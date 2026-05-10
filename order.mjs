@@ -60,24 +60,45 @@ function parsePrompt(prompt) {
   const noSeafood = /無海鮮|不要海鮮|不能.*海鮮|海鮮.*過敏|過敏|no seafood|no shrimp|seafood allerg/i.test(prompt);
   const wantSeafood = !noSeafood && /海鮮|蝦|龍蝦|蟹|干貝|魷魚|章魚|seafood|shrimp|prawn|lobster|crab|scallop/i.test(prompt);
   const wantCola = /可樂|飲料|喝|cola|coke|drink|beverage/i.test(prompt);
+  const wantSpecificCola = /可樂|cola|coke/i.test(prompt) && !/飲料|drink|beverage/i.test(prompt);
   const wantSide = /副餐|副食|side|sides|appetizer|snack|chicken wings|fries/i.test(prompt);
   const isDelivery = /外送|送到|deliver/i.test(prompt) && !/不允許|無法|blocked/.test(prompt);
   const isLunch = /午|中午|lunch|noon/i.test(prompt) || /(?:^|\D)12(?:點|時|:00|\b)/i.test(prompt);
   const isDinner = /晚|傍晚|dinner|evening/i.test(prompt) || /(?:^|\D)(18|19|20)(?:點|時|:00|\b)/i.test(prompt);
   const wantChicken = (/雞肉|雞|chicken/i.test(prompt)) && !/雞條|chicken wing/i.test(prompt);
   const wantVeg = /素食|蔬菜|vegetarian|veggie|veg/i.test(prompt);
-  return { people, budget, budgetMin, noSeafood, wantSeafood, wantCola, wantSide, isDelivery, isLunch, isDinner, wantChicken, wantVeg };
+
+  // Explicit pizza count: "再加一個X的" = at least 2, "兩個披薩" = explicit count
+  let explicitPizzaCount = 0;
+  const explicitPizzaMatch = prompt.match(/([兩三四五六七八九]|[2-9])\s*(?:個|片)?\s*(?:披薩|pizza)/i);
+  if (explicitPizzaMatch) {
+    explicitPizzaCount = parseInt(explicitPizzaMatch[1]) || ({'兩':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9})[explicitPizzaMatch[1]] || 0;
+  }
+  if (!explicitPizzaCount && /再加一個|再來一個|another|plus one|add one/i.test(prompt)) {
+    explicitPizzaCount = 2;
+  }
+  // "蝦子的...再加一個雞肉的" implies 2 different flavor requests
+  if (!explicitPizzaCount && wantSeafood && wantChicken) {
+    explicitPizzaCount = 2;
+  }
+
+  // Drink quantity: "兩瓶", "兩杯", "2 bottles"
+  let drinkCount = 1;
+  const drinkQtyMatch = prompt.match(/([兩三四五六]|[2-6])\s*(?:瓶|杯|罐|bottles?|cans?)/i);
+  if (drinkQtyMatch) {
+    drinkCount = parseInt(drinkQtyMatch[1]) || ({'兩':2,'三':3,'四':4,'五':5,'六':6})[drinkQtyMatch[1]] || 1;
+  }
+
+  return { people, budget, budgetMin, noSeafood, wantSeafood, wantCola, wantSpecificCola, wantSide, isDelivery, isLunch, isDinner, wantChicken, wantVeg, explicitPizzaCount, drinkCount };
 }
 
 const constraints = parsePrompt(PROMPT);
 console.log('Constraints:', JSON.stringify(constraints, null, 2));
 
-// Decide pizza count based on people
-function decidePizzaCount(people) {
-  if (people <= 2) return 1;
-  if (people <= 4) return 2;
-  if (people <= 6) return 3;
-  return Math.ceil(people / 2);
+// Decide pizza count based on people (or explicit request)
+function decidePizzaCount(people, explicitPizzaCount) {
+  const byPeople = people <= 2 ? 1 : people <= 4 ? 2 : people <= 6 ? 3 : Math.ceil(people / 2);
+  return Math.max(byPeople, explicitPizzaCount || 0);
 }
 
 // Pick pizzas from menu based on constraints
@@ -147,17 +168,17 @@ function pickPizzas(menuItems, constraints) {
     return 0; // keep shuffled order for same-priority items
   });
 
-  const count = decidePizzaCount(constraints.people);
+  const count = decidePizzaCount(constraints.people, constraints.explicitPizzaCount);
   const picked = [];
   const usedNames = new Set();
   let hasSeafood = false;
 
-  // If wantSeafood, pick one seafood first, then fill rest with non-seafood for variety
+  // If wantSeafood, pick one seafood first (random), then fill rest with non-seafood for variety
   if (constraints.wantSeafood) {
     const seafoodItems = candidates.filter(item => SEAFOOD_WORDS.some(w => item.name.includes(w)));
     if (seafoodItems.length > 0) {
-      const sf = seafoodItems[0];
-      const estTotal = sf.price + (constraints.wantCola ? 45 : 0) + (constraints.wantSide ? 70 : 0);
+      const sf = seafoodItems[Math.floor(Math.random() * seafoodItems.length)];
+      const estTotal = sf.price + (constraints.wantCola ? 45 * (constraints.drinkCount || 1) : 0) + (constraints.wantSide ? 70 : 0);
       if (estTotal <= constraints.budget) {
         picked.push(sf);
         usedNames.add(sf.name);
@@ -174,7 +195,7 @@ function pickPizzas(menuItems, constraints) {
     // Domino's BOGO: 2nd+ pizzas ~50% off. Estimate discounted total.
     const allPrices = [...picked.map(p => p.price), item.price].sort((a,b) => b-a);
     const discountedPizzaTotal = allPrices[0] + allPrices.slice(1).reduce((s,p) => s + Math.round(p * 0.5), 0);
-    const currentTotal = discountedPizzaTotal + (constraints.wantCola ? 45 : 0) + (constraints.wantSide ? 70 : 0);
+    const currentTotal = discountedPizzaTotal + (constraints.wantCola ? 45 * (constraints.drinkCount || 1) : 0) + (constraints.wantSide ? 70 : 0);
     if (currentTotal <= constraints.budget) {
       picked.push(item);
       usedNames.add(item.name);
@@ -190,25 +211,59 @@ function pickPizzas(menuItems, constraints) {
     }
   }
 
-  // If there's a minimum budget, check if we need to upgrade picks
+  // If there's a minimum budget, check if we need to upgrade picks or add more
+  // Use budgetMin + 5% buffer because actual BOGO discount may exceed our 50% estimate
   if (constraints.budgetMin > 0) {
-    const extras = (constraints.wantCola ? 45 : 0) + (constraints.wantSide ? 70 : 0);
-    // Use discounted estimate (BOGO: 2nd+ pizzas ~50% off)
-    const pickedPrices = picked.map(p => p.price).sort((a,b) => b-a);
-    const discTotal = pickedPrices[0] + pickedPrices.slice(1).reduce((s,p) => s + Math.round(p * 0.5), 0) + extras;
-    if (discTotal < constraints.budgetMin && picked.length > 0) {
-      // Try upgrading the cheapest pizza to a pricier one
+    const extras = (constraints.wantCola ? 45 * (constraints.drinkCount || 1) : 0) + (constraints.wantSide ? 70 : 0);
+    const targetMin = Math.ceil(constraints.budgetMin * 1.05);
+    const calcDisc = (prices) => {
+      const sorted = [...prices].sort((a,b) => b-a);
+      return sorted[0] + sorted.slice(1).reduce((s,p) => s + Math.round(p * 0.5), 0);
+    };
+    let discTotal = calcDisc(picked.map(p => p.price)) + extras;
+
+    // Strategy 1: upgrade cheapest pizza to pricier one
+    if (discTotal < targetMin && picked.length > 0) {
       const cheapestIdx = picked.reduce((minIdx, p, i, arr) => p.price < arr[minIdx].price ? i : minIdx, 0);
       const upgrade = candidates.find(item => {
         if (usedNames.has(item.name) || item.price <= picked[cheapestIdx].price) return false;
-        const newPrices = picked.map((p,i) => i === cheapestIdx ? item.price : p.price).sort((a,b) => b-a);
-        const newDisc = newPrices[0] + newPrices.slice(1).reduce((s,p) => s + Math.round(p * 0.5), 0) + extras;
-        return newDisc >= constraints.budgetMin && newDisc <= constraints.budget;
+        const newPrices = picked.map((p,i) => i === cheapestIdx ? item.price : p.price);
+        const newDisc = calcDisc(newPrices) + extras;
+        return newDisc >= targetMin && newDisc <= constraints.budget;
       });
       if (upgrade) {
         usedNames.delete(picked[cheapestIdx].name);
         picked[cheapestIdx] = upgrade;
         usedNames.add(upgrade.name);
+        discTotal = calcDisc(picked.map(p => p.price)) + extras;
+      }
+    }
+
+    // Strategy 2: add extra pizzas until we reach targetMin
+    if (discTotal < targetMin) {
+      const addCandidates = candidates.filter(item => !usedNames.has(item.name));
+      for (const item of addCandidates) {
+        const newPrices = [...picked.map(p => p.price), item.price];
+        const newDisc = calcDisc(newPrices) + extras;
+        if (newDisc <= constraints.budget) {
+          picked.push(item);
+          usedNames.add(item.name);
+          discTotal = newDisc;
+          if (discTotal >= targetMin) break;
+        }
+      }
+    }
+
+    // Strategy 3: allow duplicates if still under min
+    if (discTotal < targetMin) {
+      for (const item of candidates) {
+        const newPrices = [...picked.map(p => p.price), item.price];
+        const newDisc = calcDisc(newPrices) + extras;
+        if (newDisc <= constraints.budget) {
+          picked.push(item);
+          discTotal = newDisc;
+          if (discTotal >= targetMin) break;
+        }
       }
     }
   }
@@ -481,7 +536,7 @@ selectedPizzas.forEach(p => console.log(`    Pizza: ${p.name} (NT$${p.price})`))
 if (constraints.wantSide) console.log('    Side: 香烤雞條 (NT$70)');
 if (constraints.wantCola) console.log('    Drink: random from menu (~NT$45)');
 const pizzaPrices = selectedPizzas.map(p => p.price).sort((a,b) => b-a);
-const estTotal = pizzaPrices[0] + pizzaPrices.slice(1).reduce((s,p) => s + Math.round(p * 0.5), 0) + (constraints.wantSide ? 70 : 0) + (constraints.wantCola ? 45 : 0);
+const estTotal = pizzaPrices[0] + pizzaPrices.slice(1).reduce((s,p) => s + Math.round(p * 0.5), 0) + (constraints.wantSide ? 70 : 0) + (constraints.wantCola ? 45 * (constraints.drinkCount || 1) : 0);
 console.log(`    Estimated total: NT$${estTotal}`);
 console.log('');
 
@@ -532,34 +587,38 @@ for (const pizza of selectedPizzas) {
 
 // Add drink from suggestions
 if (constraints.wantCola) {
-  console.log('  [Drink] Selecting random drink...');
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await page.waitForTimeout(1500);
-  const drinkResult = await page.evaluate((wantSpecificCola) => {
-    const DRINK_KEYWORDS = ['可樂', '雪碧', '芬達', '奶茶', '紅茶', '綠茶', '檸檬', '汽水', '果汁', '舒跑'];
-    const cards = [...document.querySelectorAll('[data-testid*="inline-upsell-card"]')];
-    const drinkCards = cards.filter(c => DRINK_KEYWORDS.some(k => c.textContent.includes(k)));
-    // If user specifically said 可樂, prefer it; otherwise pick random
-    let target = drinkCards.length > 0 ? drinkCards[Math.floor(Math.random() * drinkCards.length)] : null;
-    if (wantSpecificCola && drinkCards.length > 0) {
-      const colaCard = drinkCards.find(c => c.textContent.includes('可樂'));
-      if (colaCard) target = colaCard;
-    }
-    if (target) {
-      const btn = target.querySelector('[data-testid*="button.add"]') || [...target.querySelectorAll('button')].find(b => b.textContent.trim() === '增加');
-      if (btn) { btn.click(); return target.textContent.replace(/\s+/g,' ').trim().substring(0,30); }
-    }
-    // Fallback: find any drink container
-    const containers = [...document.querySelectorAll('div')].filter(el => DRINK_KEYWORDS.some(k => el.textContent.includes(k)) && el.textContent.includes('增加') && el.textContent.length < 200 && el.children.length >= 2);
-    if (containers.length > 0) {
-      const pick = containers[Math.floor(Math.random() * containers.length)];
-      const btn = [...pick.querySelectorAll('button, [role="button"]')].find(b => b.textContent.trim() === '增加');
-      if (btn) { btn.click(); return pick.textContent.replace(/\s+/g,' ').trim().substring(0,30); }
-    }
-    return null;
-  }, /可樂/.test(PROMPT));
-  console.log(`    ${drinkResult ? '✓ ' + drinkResult : 'will add at checkout'}`);
-  await page.waitForTimeout(1500);
+  const drinkTotal = constraints.drinkCount || 1;
+  console.log(`  [Drink] Selecting ${drinkTotal > 1 ? drinkTotal + ' drinks' : 'random drink'}...`);
+  for (let di = 0; di < drinkTotal; di++) {
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(1500);
+    const drinkResult = await page.evaluate((wantSpecificCola) => {
+      const DRINK_KEYWORDS = ['可樂', '雪碧', '芬達', '奶茶', '紅茶', '綠茶', '檸檬', '汽水', '果汁', '舒跑'];
+      const cards = [...document.querySelectorAll('[data-testid*="inline-upsell-card"]')];
+      const drinkCards = cards.filter(c => {
+        const text = c.textContent || '';
+        return DRINK_KEYWORDS.some(k => text.includes(k)) && text.includes('增加') && text.length < 150;
+      });
+      let target = drinkCards.length > 0 ? drinkCards[Math.floor(Math.random() * drinkCards.length)] : null;
+      if (wantSpecificCola && drinkCards.length > 0) {
+        const colaCard = drinkCards.find(c => c.textContent.includes('可樂'));
+        if (colaCard) target = colaCard;
+      }
+      if (target) {
+        const btn = target.querySelector('[data-testid*="button.add"]') || [...target.querySelectorAll('button')].find(b => b.textContent.trim() === '增加');
+        if (btn) {
+          btn.click();
+          const name = (target.querySelector('[data-testid*="name"]') || target.querySelector('span') || target)
+            .textContent.replace(/\s+/g,' ').trim().split('NT$')[0].trim();
+          return name.substring(0, 20);
+        }
+      }
+      return null;
+    }, constraints.wantSpecificCola);
+    console.log(`    ${drinkResult ? '✓ ' + drinkResult : (di === 0 ? 'will add at checkout' : 'no more drinks available')}`);
+    if (!drinkResult) break;
+    await page.waitForTimeout(1500);
+  }
 }
 
 const cartText = await page.evaluate(() => { const el = [...document.querySelectorAll('*')].find(e => e.textContent.trim().match(/^\d+ 項目/) && e.textContent.includes('NT$')); return el ? el.textContent.trim() : ''; });

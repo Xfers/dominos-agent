@@ -589,35 +589,78 @@ for (const pizza of selectedPizzas) {
 if (constraints.wantCola) {
   const drinkTotal = constraints.drinkCount || 1;
   console.log(`  [Drink] Selecting ${drinkTotal > 1 ? drinkTotal + ' drinks' : 'random drink'}...`);
-  for (let di = 0; di < drinkTotal; di++) {
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page.waitForTimeout(1500);
-    const drinkResult = await page.evaluate((wantSpecificCola) => {
-      const DRINK_KEYWORDS = ['可樂', '雪碧', '芬達', '奶茶', '紅茶', '綠茶', '檸檬', '汽水', '果汁', '舒跑'];
-      const cards = [...document.querySelectorAll('[data-testid*="inline-upsell-card"]')];
-      const drinkCards = cards.filter(c => {
-        const text = c.textContent || '';
-        return DRINK_KEYWORDS.some(k => text.includes(k)) && text.includes('增加') && text.length < 150;
-      });
-      let target = drinkCards.length > 0 ? drinkCards[Math.floor(Math.random() * drinkCards.length)] : null;
-      if (wantSpecificCola && drinkCards.length > 0) {
-        const colaCard = drinkCards.find(c => c.textContent.includes('可樂'));
-        if (colaCard) target = colaCard;
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(1500);
+  // First drink: pick from upsell cards
+  const drinkResult = await page.evaluate((wantSpecificCola) => {
+    const DRINK_KEYWORDS = ['可樂', '雪碧', '芬達', '奶茶', '紅茶', '綠茶', '檸檬', '汽水', '果汁', '舒跑'];
+    const cards = [...document.querySelectorAll('[data-testid*="inline-upsell-card"]')];
+    const drinkCards = cards.filter(c => {
+      const text = c.textContent || '';
+      return DRINK_KEYWORDS.some(k => text.includes(k)) && text.includes('增加') && text.length < 150;
+    });
+    let target = drinkCards.length > 0 ? drinkCards[Math.floor(Math.random() * drinkCards.length)] : null;
+    if (wantSpecificCola && drinkCards.length > 0) {
+      const colaCard = drinkCards.find(c => c.textContent.includes('可樂'));
+      if (colaCard) target = colaCard;
+    }
+    if (target) {
+      const btn = target.querySelector('[data-testid*="button.add"]') || [...target.querySelectorAll('button')].find(b => b.textContent.trim() === '增加');
+      if (btn) {
+        btn.click();
+        const name = (target.querySelector('[data-testid*="name"]') || target.querySelector('span') || target)
+          .textContent.replace(/\s+/g,' ').trim().split('NT$')[0].trim();
+        return name.substring(0, 20);
       }
-      if (target) {
-        const btn = target.querySelector('[data-testid*="button.add"]') || [...target.querySelectorAll('button')].find(b => b.textContent.trim() === '增加');
-        if (btn) {
-          btn.click();
-          const name = (target.querySelector('[data-testid*="name"]') || target.querySelector('span') || target)
-            .textContent.replace(/\s+/g,' ').trim().split('NT$')[0].trim();
-          return name.substring(0, 20);
+    }
+    return null;
+  }, constraints.wantSpecificCola);
+  console.log(`    ${drinkResult ? '✓ ' + drinkResult : 'will add at checkout'}`);
+
+  // Additional drinks: navigate to drinks menu and add from there
+  if (drinkResult && drinkTotal > 1) {
+    await page.waitForTimeout(1500);
+    for (let di = 1; di < drinkTotal; di++) {
+      console.log(`    Adding drink ${di + 1}/${drinkTotal} from menu...`);
+      await page.goto('https://order.dominos.com.tw/menu/drinks', { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.waitForTimeout(3000);
+      // Scroll to load all drinks
+      for (let s = 0; s < 5; s++) { await page.evaluate(() => window.scrollBy(0, 400)); await page.waitForTimeout(300); }
+      const drinkAdded = await page.evaluate((wantSpecificCola) => {
+        const DRINK_KEYWORDS = ['可樂', '雪碧', '芬達', '奶茶', '紅茶', '綠茶', '檸檬', '汽水', '果汁', '舒跑', '1.25L'];
+        const items = [...document.querySelectorAll('div, span')].filter(el => {
+          const t = el.textContent.trim();
+          return DRINK_KEYWORDS.some(k => t.includes(k)) && t.length < 60 && el.children.length === 0 && el.getBoundingClientRect().height > 0;
+        });
+        // Find a drink item to click on
+        let target = null;
+        if (wantSpecificCola) {
+          target = items.find(el => el.textContent.includes('可樂'));
         }
+        if (!target && items.length > 0) {
+          target = items[Math.floor(Math.random() * items.length)];
+        }
+        if (target) {
+          (target.closest('[role="button"]') || target.closest('button') || target.parentElement?.parentElement || target).click();
+          return target.textContent.trim().substring(0, 25);
+        }
+        return null;
+      }, constraints.wantSpecificCola);
+      if (drinkAdded) {
+        await page.waitForTimeout(2000);
+        // Click "增加到訂單中" button
+        const added = await page.evaluate(() => {
+          const b = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中');
+          if (b) { b.click(); return true; }
+          return false;
+        });
+        if (added) { console.log(`    ✓ ${drinkAdded}`); }
+        else { console.log(`    ✗ add button not found for drink`); }
+        await page.waitForTimeout(1500);
+      } else {
+        console.log(`    ✗ no drink found on menu page`);
       }
-      return null;
-    }, constraints.wantSpecificCola);
-    console.log(`    ${drinkResult ? '✓ ' + drinkResult : (di === 0 ? 'will add at checkout' : 'no more drinks available')}`);
-    if (!drinkResult) break;
-    await page.waitForTimeout(1500);
+    }
   }
 }
 

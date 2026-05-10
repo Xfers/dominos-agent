@@ -36,21 +36,19 @@ function parsePrompt(prompt) {
   // Chinese numeral conversion
   const cnNum = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10};
   let people = 2;
-  const pMatch = prompt.match(/(\d+)\s*(?:人|個人)/) || prompt.match(/([一二三四五六七八九十])\s*(?:人|個人)/);
+  const pMatch = prompt.match(/(\d+)\s*(?:人|個人|people|person|pax)/) || prompt.match(/([一二三四五六七八九十])\s*(?:人|個人)/) || prompt.match(/(?:for|feed)\s*(\d+)/i);
   if (pMatch) people = parseInt(pMatch[1]) || cnNum[pMatch[1]] || 2;
 
-  const budgetRange = prompt.match(/介於\s*NT?\$?(\d{3,5})\s*到\s*NT?\$?(\d{3,5})/);
+  const budgetRange = prompt.match(/介於\s*NT?\$?(\d{3,5})\s*到\s*NT?\$?(\d{3,5})/) || prompt.match(/(?:between|from)\s*NT?\$?(\d{3,5})\s*(?:to|and|-|~)\s*NT?\$?(\d{3,5})/i);
   let budgetMin = 0, budget = 1500;
   if (budgetRange) {
     budgetMin = parseInt(budgetRange[1]);
     budget = parseInt(budgetRange[2]);
   } else {
-    // Try digit-based budget first
-    const digitBudget = prompt.match(/(\d{3,5})\s*(?:以下|元|塊)/) || prompt.match(/NT\$?(\d{3,5})/);
+    const digitBudget = prompt.match(/(\d{3,5})\s*(?:以下|元|塊)/) || prompt.match(/NT\$?(\d{3,5})/) || prompt.match(/(?:under|below|max|budget|within)\s*(?:NT)?\$?(\d{3,5})/i) || prompt.match(/\$(\d{3,5})\s*(?:budget|max|or less)/i) || prompt.match(/\$(\d{3,5})/);
     if (digitBudget) {
       budget = parseInt(digitBudget[1]);
     } else {
-      // Chinese number budget: 兩千, 一千五, 三千, etc.
       const cnBudgetMap = {'一':1,'二':2,'兩':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9};
       const cnBudgetMatch = prompt.match(/([一二兩三四五六七八九])千([五])?/);
       if (cnBudgetMatch) {
@@ -59,15 +57,15 @@ function parsePrompt(prompt) {
     }
   }
   // noSeafood only if explicitly avoiding (無海鮮, 不要海鮮, 海鮮過敏)
-  const noSeafood = /無海鮮|不要海鮮|不能.*海鮮|海鮮.*過敏|過敏/.test(prompt);
-  const wantSeafood = !noSeafood && /海鮮|蝦|龍蝦|蟹|干貝|魷魚|章魚/.test(prompt);
-  const wantCola = /可樂|飲料|喝/.test(prompt);
-  const wantSide = /副餐|副食/.test(prompt);
-  const isDelivery = /外送|送到/.test(prompt) && !/不允許|無法|blocked/.test(prompt);
-  const isLunch = /午|中午|12/.test(prompt);
-  const isDinner = /晚|傍晚|18|19|20/.test(prompt);
-  const wantChicken = /雞肉|雞/.test(prompt) && !/雞條/.test(prompt);
-  const wantVeg = /素食|蔬菜/.test(prompt);
+  const noSeafood = /無海鮮|不要海鮮|不能.*海鮮|海鮮.*過敏|過敏|no seafood|no shrimp|seafood allerg/i.test(prompt);
+  const wantSeafood = !noSeafood && /海鮮|蝦|龍蝦|蟹|干貝|魷魚|章魚|seafood|shrimp|prawn|lobster|crab|scallop/i.test(prompt);
+  const wantCola = /可樂|飲料|喝|cola|coke|drink|beverage/i.test(prompt);
+  const wantSide = /副餐|副食|side|sides|appetizer|snack|chicken wings|fries/i.test(prompt);
+  const isDelivery = /外送|送到|deliver/i.test(prompt) && !/不允許|無法|blocked/.test(prompt);
+  const isLunch = /午|中午|lunch|noon/i.test(prompt) || /(?:^|\D)12(?:點|時|:00|\b)/i.test(prompt);
+  const isDinner = /晚|傍晚|dinner|evening/i.test(prompt) || /(?:^|\D)(18|19|20)(?:點|時|:00|\b)/i.test(prompt);
+  const wantChicken = (/雞肉|雞|chicken/i.test(prompt)) && !/雞條|chicken wing/i.test(prompt);
+  const wantVeg = /素食|蔬菜|vegetarian|veggie|veg/i.test(prompt);
   return { people, budget, budgetMin, noSeafood, wantSeafood, wantCola, wantSide, isDelivery, isLunch, isDinner, wantChicken, wantVeg };
 }
 

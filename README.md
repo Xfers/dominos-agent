@@ -141,12 +141,20 @@ Response contains an `iframe_url` with card details. The agent:
 | 5人 無海鮮+雞肉 NT$1500-2500 可樂+副餐 傍晚外帶 | 奶油白醬烤雞, BBQ雞肉, BBQ雞肉(火山), 香烤雞條, 1.25L可樂 | NT$1,495 | PASS |
 | 6人 無海鮮 NT$2000 飲料+副餐 外帶 | 超級墨西哥, 肉魔王四喜, 極致蒜香壽喜牛, 香烤雞條, 1.25L可樂 | NT$1,465 | PASS |
 
-### Natural Language Prompts (真人口語)
+### Natural Language Prompts
 
-| Prompt | Items Ordered | Total | Result |
-|--------|--------------|-------|--------|
-| 今天晚餐想吃披薩，我們家三個人，不要太貴大概一千塊左右就好，幫我訂外帶 | 超級墨西哥, 超級美國 | NT$660 | PASS |
-| 老婆說想吃有蝦子的披薩，再加一個雞肉的，順便幫我帶兩瓶可樂，預算抓兩千以內，外帶 | 蟹肉鮮蝦沙拉, 1.25L可樂 | NT$675 | PASS |
+| # | Prompt | Items Ordered | Total | Result |
+|---|--------|--------------|-------|--------|
+| 1 | 今天晚餐想吃披薩，我們家三個人，不要太貴大概一千塊左右就好，幫我訂外帶 | 超級墨西哥, 超級美國 | NT$660 | PASS |
+| 2 | 老婆說想吃有蝦子的披薩，再加一個雞肉的，順便幫我帶兩瓶可樂，預算抓兩千以內，外帶 | 蟹肉鮮蝦沙拉, 1.25L可樂 | NT$675 | PASS |
+| 3 | 4人份、其中一個要有海鮮口味、金額要介於NT1000到NT1500、必須買可樂跟隨便一個副餐、明天中午12點外送到預先指定的地址 | 蟹肉鮮蝦沙拉, 超級美國, 香烤雞條, 1.25L可樂 | NT$1,070 | PASS |
+| 4 | 5人份、無海鮮、想吃雞肉、金額要介於NT1500到NT2500、必須買可樂跟副餐、傍晚6點外帶 | 奶油白醬烤雞, BBQ雞肉, BBQ雞肉(火山), 香烤雞條, 1.25L可樂 | NT$1,495 | PASS |
+| 5 | 4人份、無海鮮（過敏）、預算NT$1500以下、要可樂+副餐、外帶 | 超級墨西哥, 小農田園鮮蔬, 香烤雞條, 1.25L可樂 | NT$785 | PASS |
+| 6 | Order pizza for 4 people, seafood, budget under NT$1500, with coke and sides, pickup | 蟹肉鮮蝦沙拉, 超級美國, 香烤雞條, 1.25L可樂 | NT$1,190 | PASS |
+| 7 | Feed 2, chicken flavor, $800 max, pickup | 奶油白醬烤雞 | NT$630 | PASS |
+| 8 | Pizza night! 6 people, no seafood allergy, under $2000, with drinks and sides | 超級墨西哥 ×3, 香烤雞條, 1.25L可樂 | NT$1,105 | PASS |
+| 9 | Dinner for 5, between NT1500 to NT2500, no shrimp, want chicken, with drinks | 奶油白醬烤雞 ×2, 1.25L可樂 | NT$795 | PASS |
+| 10 | 3 people, vegetarian, no seafood, under 1200, with drinks | 小農田園鮮蔬, 白醬彩蔬, 1.25L可樂 | NT$680 | PASS |
 
 ### Edge Cases Handled
 

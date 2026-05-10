@@ -1,0 +1,22 @@
+{
+  "name": "dominos-agent",
+  "version": "1.0.0",
+  "description": "Autonomous Domino's Taiwan ordering agent with StraitsX virtual card payment via MCP",
+  "type": "module",
+  "scripts": {
+    "order": "node order.mjs",
+    "order:submit": "node order.mjs --submit",
+    "test:pickup": "node order.mjs '2人份、想吃雞肉口味、預算800元、外帶'",
+    "test:delivery": "node order.mjs '4人份、其中一個要有海鮮口味、金額要介於NT1000到NT1500、必須買可樂跟隨便一個副餐、明天中午12點外送到預先指定的地址'",
+    "test:budget": "node order.mjs '1人份、隨便、500元以下'",
+    "test:vegetarian": "node order.mjs '3人份、素食、預算1200元、要飲料'",
+    "setup": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "1.52.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

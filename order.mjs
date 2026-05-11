@@ -20,6 +20,7 @@ const USER_NAME = process.env.USER_NAME || '';
 const USER_PHONE = process.env.USER_PHONE || '';
 const USER_EMAIL = process.env.USER_EMAIL || '';
 const INVOICE_CARRIER = process.env.INVOICE_CARRIER || '';
+const USER_ADDRESS = process.env.USER_ADDRESS || '信義區';
 
 // Seafood keywords to avoid
 const SEAFOOD_WORDS = ['海鮮', '鮪魚', '蝦', '鱈魚', '魷魚', '蟹', '干貝', '鮭魚', '章魚'];
@@ -299,11 +300,10 @@ if (constraints.isDelivery) {
     const addrInput = page.locator('input[placeholder*="輸入"]').first();
     await addrInput.click();
     await page.waitForTimeout(500);
-    // Extract address from prompt or use default
+    // Extract address from prompt or use .env USER_ADDRESS
     const addrMatch = PROMPT.match(/送到(.+?)(?:、|$|，)/) || PROMPT.match(/外送到(.+?)(?:、|$|，)/);
-    let addr = addrMatch ? addrMatch[1] : '信義區';
-    // If extracted address is generic (指定地址, 家, etc.), use 信義區
-    if (/指定|地址|家|公司/.test(addr)) addr = '信義區';
+    let addr = addrMatch ? addrMatch[1] : USER_ADDRESS;
+    if (/指定|地址|家|公司|預先/.test(addr)) addr = USER_ADDRESS;
     console.log(`    Address: ${addr}`);
     await addrInput.fill(addr);
     await page.waitForTimeout(4000);
@@ -399,10 +399,10 @@ if (!storeOk) {
   await page.screenshot({ path: `${SS}/smart-s2-pickup.png` });
   await page.locator('input[placeholder*="輸入"]').first().click();
   await page.waitForTimeout(500);
-  await page.locator('input[placeholder*="輸入"]').first().fill('信義區');
+  await page.locator('input[placeholder*="輸入"]').first().fill(USER_ADDRESS);
   await page.waitForTimeout(4000);
   await page.screenshot({ path: `${SS}/smart-s3-search.png` });
-  const suggClicked = await page.evaluate(() => { const d = [...document.querySelectorAll('div')].filter(el => el.textContent.trim() === '信義區台灣臺北市' && el.children.length <= 3); d.sort((a,b) => a.textContent.length - b.textContent.length); if (d[0]) { d[0].click(); return true; } return false; });
+  const suggClicked = await page.evaluate((searchAddr) => { const d = [...document.querySelectorAll('div')].filter(el => { const t = el.textContent.trim(); return t.includes('台灣') && el.children.length <= 3 && t.length < 50; }); d.sort((a,b) => a.textContent.length - b.textContent.length); if (d[0]) { d[0].click(); return true; } return false; }, USER_ADDRESS);
   console.log(`    Address suggestion clicked: ${suggClicked}`);
   await page.waitForTimeout(5000);
   await page.screenshot({ path: `${SS}/smart-s4-stores.png` });
@@ -478,6 +478,168 @@ if (!page.url().includes('/menu')) {
   await browser.close(); process.exit(1);
 }
 console.log('  Store ready ✓\n');
+
+// ============================================================
+// STEP 1.5: Scan Promotions (當期主打, 精選套餐, 自由任你配, 專屬優惠)
+// ============================================================
+console.log('=== STEP 1.5: Scan Promotions ===');
+let promoUsed = false;
+let promoItems = [];
+
+async function scanPromos() {
+  // Check deals page for active promotions
+  await page.goto('https://order.dominos.com.tw/menu/deals', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(3000);
+
+  // Scroll to load all promo sections
+  for (let i = 0; i < 8; i++) {
+    await page.evaluate(() => window.scrollBy(0, 500));
+    await page.waitForTimeout(400);
+  }
+
+  // Extract all visible promotions with their names and prices
+  const promos = await page.evaluate(() => {
+    const results = [];
+    const seen = new Set();
+    const allText = document.body.innerText;
+    const lines = allText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+    // Look for promo patterns: "買大送大", "套餐", "任你配", etc.
+    const PROMO_PATTERNS = ['買大送大', '買一送一', '大披薩', '套餐', '任你配', '優惠', '起'];
+    const SECTION_NAMES = ['當期主打', '精選套餐', '自由任你配', '專屬優惠', '超值', '限時'];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // Detect promo items: lines with price that contain promo keywords
+      if (PROMO_PATTERNS.some(p => line.includes(p)) || (line.includes('NT$') && line.includes('起'))) {
+        const priceMatch = line.match(/NT\$(\d+)/);
+        if (priceMatch && !seen.has(line)) {
+          results.push({ text: line, price: parseInt(priceMatch[1]), line: i });
+          seen.add(line);
+        }
+      }
+      // Also check if current line is a promo name and next lines have price
+      if (line.length >= 4 && line.length <= 40 && PROMO_PATTERNS.some(p => line.includes(p)) && !line.includes('NT$')) {
+        for (let j = 1; j <= 3; j++) {
+          if (i + j < lines.length && lines[i + j].includes('NT$')) {
+            const pm = lines[i + j].match(/NT\$(\d+)/);
+            if (pm && !seen.has(line)) {
+              results.push({ text: line, price: parseInt(pm[1]), line: i });
+              seen.add(line);
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    // Also look for clickable promo cards/sections
+    const promoCards = [...document.querySelectorAll('[data-testid*="deal"], [data-testid*="promo"], [data-testid*="coupon"], [role="button"]')].filter(el => {
+      const t = el.textContent.trim();
+      return (PROMO_PATTERNS.some(p => t.includes(p)) || SECTION_NAMES.some(s => t.includes(s))) && t.length < 200 && el.getBoundingClientRect().height > 0;
+    }).map(el => ({ text: el.textContent.trim().substring(0, 80), hasPrice: /NT\$\d+/.test(el.textContent) }));
+
+    // Detect section tabs/navigation
+    const tabs = [...document.querySelectorAll('div, span, a, button')].filter(el => {
+      const t = el.textContent.trim();
+      return SECTION_NAMES.some(s => t === s) && el.children.length <= 2 && el.getBoundingClientRect().height > 0;
+    }).map(el => el.textContent.trim());
+
+    return { promos: results, cards: promoCards.slice(0, 10), tabs };
+  });
+
+  console.log(`  Found ${promos.promos.length} promo items, ${promos.cards.length} promo cards`);
+  if (promos.tabs.length > 0) console.log(`  Promo tabs: ${promos.tabs.join(', ')}`);
+  promos.promos.forEach(p => console.log(`    ${p.text} (NT$${p.price})`));
+  promos.cards.slice(0, 5).forEach(c => console.log(`    [Card] ${c.text}`));
+
+  return promos;
+}
+
+const pizzaCount = decidePizzaCount(constraints.people, constraints.explicitPizzaCount);
+
+// Only try promos if ordering 2+ pizzas (BOGO deals are the main value)
+if (pizzaCount >= 2) {
+  const promos = await scanPromos();
+
+  // Look for BOGO-type deals (買大送大, 買一送一) that fit our budget
+  const bogoPromos = promos.promos.filter(p => /買大送大|買一送一|兩個大披薩/.test(p.text));
+  const comboPromos = promos.promos.filter(p => /套餐|任你配/.test(p.text));
+
+  if (bogoPromos.length > 0) {
+    console.log(`  → BOGO deal available: ${bogoPromos[0].text}`);
+    // Try to use the BOGO deal by clicking it on the deals page
+    const bogoClicked = await page.evaluate((bogoText) => {
+      const els = [...document.querySelectorAll('div, span, [role="button"], button')].filter(el => {
+        const t = el.textContent.trim();
+        return t.includes(bogoText.substring(0, 6)) && el.getBoundingClientRect().height > 0 && t.length < 200;
+      });
+      // Click the most specific (shortest text) match
+      els.sort((a, b) => a.textContent.length - b.textContent.length);
+      const clickTarget = els.find(el => el.closest('[role="button"]') || el.closest('button') || el.closest('a'));
+      if (clickTarget) {
+        const btn = clickTarget.closest('[role="button"]') || clickTarget.closest('button') || clickTarget.closest('a') || clickTarget;
+        btn.click();
+        return btn.textContent.trim().substring(0, 50);
+      }
+      if (els[0]) { els[0].click(); return els[0].textContent.trim().substring(0, 50); }
+      return null;
+    }, bogoPromos[0].text);
+
+    if (bogoClicked) {
+      console.log(`    Clicked: "${bogoClicked}"`);
+      await page.waitForTimeout(3000);
+
+      // Check if we landed on a promo configuration page (pizza selection within deal)
+      const promoPage = await page.evaluate(() => {
+        const body = document.body.innerText;
+        return {
+          hasPizzaSelection: body.includes('選擇') && (body.includes('披薩') || body.includes('口味')),
+          hasAddButton: !!([...document.querySelectorAll('button')].find(b => b.textContent.includes('增加到訂單中') || b.textContent.includes('加入'))),
+          url: window.location.href
+        };
+      });
+      console.log(`    Promo page: ${JSON.stringify(promoPage)}`);
+
+      if (promoPage.hasPizzaSelection) {
+        // We're in a promo builder — select pizzas within the deal
+        console.log('    → Promo builder detected, selecting pizzas within deal...');
+        promoUsed = true;
+      }
+    }
+  } else if (comboPromos.length > 0) {
+    console.log(`  → Combo deal available: ${comboPromos[0].text}`);
+  }
+
+  if (!promoUsed) {
+    console.log('  → No usable promo applied, will use regular menu ordering');
+    // Also check if there's a coupon code we can apply later at checkout
+    const couponInfo = promos.promos.filter(p => /優惠碼|折扣碼|coupon/i.test(p.text));
+    if (couponInfo.length > 0) console.log(`  → Coupon codes found: ${couponInfo.map(c => c.text).join(', ')}`);
+  }
+} else {
+  console.log('  Skipping promos (single pizza order)');
+}
+
+// Also try to apply any available coupons at the menu level
+if (!promoUsed) {
+  // Navigate to menu and check for promo banner/coupon input
+  await page.goto('https://order.dominos.com.tw/menu/pizza', { waitUntil: 'domcontentloaded', timeout: 15000 });
+  await page.waitForTimeout(2000);
+
+  // Check for coupon/promo code input field and auto-apply if available
+  const couponApplied = await page.evaluate(() => {
+    // Look for "新增優惠券" or coupon input
+    const couponBtn = [...document.querySelectorAll('div, span, button')].find(el =>
+      (el.textContent.trim() === '新增優惠券' || el.textContent.trim() === '增加優惠碼') &&
+      el.children.length <= 2 && el.getBoundingClientRect().height > 0
+    );
+    return couponBtn ? couponBtn.textContent.trim() : null;
+  });
+  if (couponApplied) console.log(`  Coupon input available: "${couponApplied}" (will check at checkout)`);
+}
+
+console.log('');
 
 // ============================================================
 // STEP 2: Scan Menu & Decide

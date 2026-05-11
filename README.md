@@ -49,6 +49,14 @@ npm run test:vegetarian  # 3 people, vegetarian, NT$1200, with drink
 │  2. Store Selection (delivery or pickup, open or closed/預約)     │
 │     → Auto-selects time closest to desired hour                  │
 │     → Handles store-closed with fallback to pickup               │
+│     → Delivery address from .env USER_ADDRESS                    │
+└──────────────────────────────┬───────────────────────────────────┘
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  2.5. Promotion Scan (當期主打, 精選套餐, 自由任你配, 專屬優惠)    │
+│     → Checks /menu/deals for active BOGO and combo deals         │
+│     → Prefers 買大送大 (NT$550起) for 2+ pizza orders             │
+│     → Falls back to regular menu if no usable promo              │
 └──────────────────────────────┬───────────────────────────────────┘
                                ▼
 ┌──────────────────────────────────────────────────────────────────┐
@@ -134,6 +142,7 @@ Full MCP response is logged to console for debugging.
 | `USER_NAME` | Yes | Name for checkout (Chinese) |
 | `USER_PHONE` | Yes | Phone for checkout (09xxxxxxxx) |
 | `USER_EMAIL` | Yes | Email for checkout |
+| `USER_ADDRESS` | No | Delivery/pickup address (default: 信義區) |
 | `INVOICE_CARRIER` | No | Taiwan e-invoice carrier ID |
 
 ## Verified Test Results
@@ -195,13 +204,16 @@ The agent correctly plans 3 pizzas with estimated total NT$1,590 (above budgetMi
 - **Explicit pizza count** — "再加一個雞肉的" correctly orders 2 pizzas
 - **3DS auto-approval** — waits up to 90s for StraitsX 3DS verification
 - **MCP response logging** — full JSON-RPC response printed for debugging
+- **Promotion scanning** — checks 當期主打, 精選套餐, 自由任你配, 專屬優惠 for BOGO/combo deals before ordering
+- **Delivery address from .env** — uses `USER_ADDRESS` instead of hardcoded value; prompt can override
 
 ## Architecture
 
 ```
 dominos-agent/
-├── order.mjs              # Main orchestrator (~1000 lines)
+├── order.mjs              # Main orchestrator (~1100 lines)
 │   ├── parsePrompt()      # NLP constraint extraction (CN + EN)
+│   ├── scanPromos()       # Promotion/coupon scanning (deals page)
 │   ├── pickPizzas()       # Budget-aware, constraint-filtered, randomized
 │   ├── addPizza()         # Navigate menu, click with retry, select size, add
 │   ├── Store selection    # Delivery/pickup, open/closed handling

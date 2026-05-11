@@ -549,21 +549,53 @@ async function addPizza(name) {
   console.log(`  [Pizza] ${name}...`);
   await page.goto('https://order.dominos.com.tw/menu/pizza', { waitUntil: 'domcontentloaded', timeout: 15000 });
   await page.waitForTimeout(3000);
-  let found = false;
-  for (let s = 0; s < 15; s++) {
-    found = await page.evaluate((n) => {
-      const els = [...document.querySelectorAll('div, span')].filter(e =>
-        e.textContent.trim() === n && e.children.length === 0 && e.getBoundingClientRect().height > 0
-      );
-      if (els.length > 0) { (els[0].closest('[role="button"]') || els[0].closest('button') || els[0].parentElement?.parentElement || els[0]).click(); return true; }
-      return false;
-    }, name);
-    if (found) break;
-    await page.evaluate(() => window.scrollBy(0, 500));
-    await page.waitForTimeout(500);
+
+  let modalOpen = false;
+  for (let attempt = 0; attempt < 3 && !modalOpen; attempt++) {
+    let found = false;
+    for (let s = 0; s < 15; s++) {
+      found = await page.evaluate((n) => {
+        const els = [...document.querySelectorAll('div, span')].filter(e =>
+          e.textContent.trim() === n && e.children.length === 0 && e.getBoundingClientRect().height > 0
+        );
+        if (els.length > 0) {
+          const el = els[0];
+          // Try multiple click targets: role=button ancestor, card container, or element itself
+          const clickTarget = el.closest('[role="button"]') || el.closest('[data-testid]') || el.closest('button') || el.parentElement?.parentElement?.parentElement || el.parentElement?.parentElement || el;
+          clickTarget.click();
+          return true;
+        }
+        return false;
+      }, name);
+      if (found) break;
+      await page.evaluate(() => window.scrollBy(0, 500));
+      await page.waitForTimeout(500);
+    }
+    if (!found) { console.log(`    ✗ not found on menu`); return false; }
+    await page.waitForTimeout(2500);
+
+    // Check if modal opened (增加到訂單中 button visible)
+    modalOpen = await page.evaluate(() => !!([...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中' && el.getBoundingClientRect().height > 0)));
+    if (!modalOpen && attempt < 2) {
+      console.log(`    retry ${attempt + 1} (modal didn't open)...`);
+      // Alternative: try clicking via coordinates on the pizza card
+      const coords = await page.evaluate((n) => {
+        const el = [...document.querySelectorAll('div, span')].find(e => e.textContent.trim() === n && e.children.length === 0 && e.getBoundingClientRect().height > 0);
+        if (!el) return null;
+        const card = el.closest('[role="button"]') || el.parentElement?.parentElement?.parentElement || el.parentElement;
+        if (!card) return null;
+        const r = card.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      }, name);
+      if (coords) {
+        await page.mouse.click(coords.x, coords.y);
+        await page.waitForTimeout(2500);
+        modalOpen = await page.evaluate(() => !!([...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中' && el.getBoundingClientRect().height > 0)));
+      }
+    }
   }
-  if (!found) { console.log(`    ✗ not found`); return false; }
-  await page.waitForTimeout(2000);
+
+  if (!modalOpen) { console.log(`    ✗ add button not found (modal didn't open)`); return false; }
 
   // Select size: 大披薩 for 3+ people, otherwise keep default
   if (constraints.people >= 3) {
@@ -571,8 +603,7 @@ async function addPizza(name) {
   }
   await page.waitForTimeout(800);
 
-  const added = await page.evaluate(() => { const b = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中'); if (b) { b.click(); return true; } return false; });
-  if (!added) { console.log(`    ✗ add button not found`); return false; }
+  await page.evaluate(() => { const b = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中'); if (b) b.click(); });
   await page.waitForTimeout(2000);
   console.log(`    ✓`);
   return true;
@@ -624,42 +655,37 @@ if (constraints.wantCola) {
       console.log(`    Adding drink ${di + 1}/${drinkTotal} from menu...`);
       await page.goto('https://order.dominos.com.tw/menu/drinks', { waitUntil: 'domcontentloaded', timeout: 15000 });
       await page.waitForTimeout(3000);
-      // Scroll to load all drinks
       for (let s = 0; s < 5; s++) { await page.evaluate(() => window.scrollBy(0, 400)); await page.waitForTimeout(300); }
-      const drinkAdded = await page.evaluate((wantSpecificCola) => {
+      // Click on a drink item
+      const drinkClicked = await page.evaluate((wantSpecificCola) => {
         const DRINK_KEYWORDS = ['可樂', '雪碧', '芬達', '奶茶', '紅茶', '綠茶', '檸檬', '汽水', '果汁', '舒跑', '1.25L'];
-        const items = [...document.querySelectorAll('div, span')].filter(el => {
-          const t = el.textContent.trim();
-          return DRINK_KEYWORDS.some(k => t.includes(k)) && t.length < 60 && el.children.length === 0 && el.getBoundingClientRect().height > 0;
+        const els = [...document.querySelectorAll('div, span')].filter(e => {
+          const t = e.textContent.trim();
+          return DRINK_KEYWORDS.some(k => t.includes(k)) && t.length > 2 && t.length < 30 && e.children.length === 0 && e.getBoundingClientRect().height > 0;
         });
-        // Find a drink item to click on
         let target = null;
-        if (wantSpecificCola) {
-          target = items.find(el => el.textContent.includes('可樂'));
-        }
-        if (!target && items.length > 0) {
-          target = items[Math.floor(Math.random() * items.length)];
-        }
+        if (wantSpecificCola) target = els.find(el => el.textContent.includes('可樂'));
+        if (!target && els.length > 0) target = els[Math.floor(Math.random() * els.length)];
         if (target) {
-          (target.closest('[role="button"]') || target.closest('button') || target.parentElement?.parentElement || target).click();
-          return target.textContent.trim().substring(0, 25);
+          const clickTarget = target.closest('[role="button"]') || target.closest('[data-testid]') || target.parentElement?.parentElement?.parentElement || target.parentElement?.parentElement || target;
+          clickTarget.click();
+          return target.textContent.trim();
         }
         return null;
       }, constraints.wantSpecificCola);
-      if (drinkAdded) {
-        await page.waitForTimeout(2000);
-        // Click "增加到訂單中" button
-        const added = await page.evaluate(() => {
-          const b = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中');
-          if (b) { b.click(); return true; }
-          return false;
-        });
-        if (added) { console.log(`    ✓ ${drinkAdded}`); }
-        else { console.log(`    ✗ add button not found for drink`); }
-        await page.waitForTimeout(1500);
-      } else {
-        console.log(`    ✗ no drink found on menu page`);
-      }
+      if (!drinkClicked) { console.log(`    ✗ no drink found on menu`); continue; }
+      await page.waitForTimeout(2500);
+      // Try "增加到訂單中" (modal) first, then "增加" (inline)
+      const added = await page.evaluate(() => {
+        const modalBtn = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中' && el.getBoundingClientRect().height > 0);
+        if (modalBtn) { modalBtn.click(); return 'modal'; }
+        const inlineBtn = [...document.querySelectorAll('button, [role="button"]')].find(el => el.textContent.trim() === '增加' && el.getBoundingClientRect().height > 0);
+        if (inlineBtn) { inlineBtn.click(); return 'inline'; }
+        return null;
+      });
+      if (added) { console.log(`    ✓ ${drinkClicked} (${added})`); }
+      else { console.log(`    ✗ no add button for ${drinkClicked}`); }
+      await page.waitForTimeout(1500);
     }
   }
 }

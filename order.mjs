@@ -787,7 +787,7 @@ if (!promoUsed) {
   await page.waitForTimeout(3000);
 
   // Apply voucher: click "新增優惠券" on the voucher card (e.g. "買大送大")
-  // The voucher cards are at the top of the pizza menu with testId like "menu-scene.pizza.Voucher.*.lovable-menu"
+  // For exact order mode: apply here, then use deal-builder for 大 pizzas, add others separately
   if (exactOrder && exactOrder.wantCoupon) {
     console.log('  [Voucher] Applying deal from pizza menu page...');
     // Scroll to top to ensure voucher cards are visible
@@ -798,10 +798,13 @@ if (!promoUsed) {
       // Find voucher cards (testId contains "Voucher")
       const voucherCards = [...document.querySelectorAll('[data-testid*="Voucher"][data-testid*="lovable-menu"]')];
       if (voucherCards.length === 0) return { found: false, debug: 'no voucher cards with testId' };
-      // Prefer "買大送小" or "買大送大" voucher
+      // Prefer "買大送小" then "買大送大" voucher
       const targetVoucher = voucherCards.find(el => {
         const t = el.textContent || '';
-        return t.includes('買大送小') || t.includes('買大送大');
+        return t.includes('買大送小');
+      }) || voucherCards.find(el => {
+        const t = el.textContent || '';
+        return t.includes('買大送大');
       }) || voucherCards[0];
       const btn = targetVoucher.querySelector('button');
       if (btn) { btn.click(); return { found: true, text: targetVoucher.textContent.trim().substring(0, 40), method: 'button' }; }
@@ -811,45 +814,8 @@ if (!promoUsed) {
 
     if (voucherApplied.found) {
       console.log(`    Clicked voucher: ${voucherApplied.text} (${voucherApplied.method})`);
+      promoUsed = true;
       await page.waitForTimeout(3000);
-
-      // After clicking "新增優惠券", a voucher selection modal/overlay may appear
-      // Look for "外送買大送小" or similar deal option and select it
-      const dealSelected = await page.evaluate(() => {
-        // Look for deal options in the opened modal/overlay
-        const dealKeywords = ['外送買大送小', '買大送小', '買大送大', '外送'];
-        const allEls = [...document.querySelectorAll('div, span, button, [role="button"], [role="radio"], [role="option"]')].filter(el => {
-          const t = el.textContent.trim();
-          return el.getBoundingClientRect().height > 0 && t.length > 3 && t.length < 80;
-        });
-        // Try to find and click the best matching deal
-        for (const kw of dealKeywords) {
-          const match = allEls.find(el => el.textContent.trim().includes(kw) && el.textContent.trim().length < 60);
-          if (match) {
-            const clickTarget = match.closest('[role="button"]') || match.closest('button') || match;
-            clickTarget.click();
-            return 'selected:' + match.textContent.trim().substring(0, 40);
-          }
-        }
-        // Look for any "套用"/"使用"/"選擇" button
-        const applyBtns = allEls.filter(el => {
-          const t = el.textContent.trim();
-          return (t === '套用' || t === '使用' || t === '選擇' || t === '確認') && el.tagName === 'BUTTON';
-        });
-        if (applyBtns.length > 0) { applyBtns[0].click(); return 'apply-btn:' + applyBtns[0].textContent.trim(); }
-        // Check if the voucher was auto-applied (page changed)
-        const body = document.body.innerText;
-        if (body.includes('已套用') || body.includes('優惠已') || body.includes('折扣')) return 'auto-applied';
-        return null;
-      });
-      if (dealSelected) {
-        console.log(`    Deal: ${dealSelected}`);
-        promoUsed = true;
-        await page.waitForTimeout(2000);
-      } else {
-        console.log('    No deal selection UI appeared (voucher may have been auto-applied)');
-        promoUsed = true;
-      }
     } else {
       console.log(`    ${voucherApplied.debug || 'No voucher card found'}`);
       // Fallback: try clicking any "新增優惠券" button on the page
@@ -1003,19 +969,104 @@ async function addPizza(name, opts = {}) {
   // Select size: exact mode uses specified size, otherwise 大披薩 for 3+ people
   const targetSize = size === '大' ? '大披薩' : size === '小' ? '小披薩' : size === '中' ? '中披薩' : (constraints.people >= 3 ? '大披薩' : null);
   if (targetSize) {
-    await page.evaluate((sz) => { [...document.querySelectorAll('div, span, button')].filter(el => el.textContent.trim() === sz && el.children.length <= 1).forEach(el => el.click()); }, targetSize);
+    // Scroll modal to top to reveal size tabs
+    await page.evaluate(() => {
+      const addBtn = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中' && el.getBoundingClientRect().height > 0);
+      if (addBtn) {
+        const modal = addBtn.closest('[role="dialog"]') || addBtn.parentElement?.parentElement?.parentElement?.parentElement?.parentElement?.parentElement;
+        if (modal) { const scrollable = modal.querySelector('[data-testid*="scroll"]') || modal; scrollable.scrollTop = 0; }
+      }
+    });
     await page.waitForTimeout(500);
+    const sizeClicked = await page.evaluate((sz) => {
+      const addBtn = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中' && el.getBoundingClientRect().height > 0);
+      const modal = addBtn ? (addBtn.closest('[role="dialog"]') || addBtn.parentElement?.parentElement?.parentElement?.parentElement?.parentElement?.parentElement) : document;
+      const container = modal || document;
+      // Strategy 1: exact match on role="tab"
+      const exactTabs = [...container.querySelectorAll('[role="tab"]')].filter(el => el.textContent.trim() === sz && el.getBoundingClientRect().height > 0);
+      if (exactTabs.length > 0) { exactTabs[0].click(); return { clicked: sz, method: 'exact-tab' }; }
+      // Strategy 2: any element with exact text (allow children)
+      const exact = [...container.querySelectorAll('div, span, button')].filter(el => {
+        const t = el.textContent.trim();
+        return t === sz && el.getBoundingClientRect().height > 0;
+      });
+      if (exact.length > 0) { exact[0].click(); return { clicked: sz, method: 'exact-text' }; }
+      // Strategy 3: size dropdown button — look for button containing "尺寸" text, click to open dropdown
+      const sizeBtn = [...container.querySelectorAll('button, [role="button"]')].find(el => {
+        const t = el.textContent.trim();
+        return t.includes('尺寸') && t.length < 20 && el.getBoundingClientRect().height > 0;
+      });
+      if (sizeBtn) {
+        sizeBtn.click();
+        return { clicked: null, openedDropdown: sizeBtn.textContent.trim() };
+      }
+      return { clicked: null, error: 'no size control found' };
+    }, targetSize);
+    if (sizeClicked.clicked) {
+      console.log(`    size: ${sizeClicked.clicked}`);
+    } else if (sizeClicked.openedDropdown) {
+      // Dropdown opened — wait and select the target size
+      await page.waitForTimeout(1000);
+      const picked = await page.evaluate((sz) => {
+        const options = [...document.querySelectorAll('div, span, button, [role="option"], [role="menuitem"], [role="radio"]')].filter(el => {
+          const t = el.textContent.trim();
+          return t === sz && el.getBoundingClientRect().height > 0 && el.children.length <= 2;
+        });
+        if (options.length > 0) { options[0].click(); return sz; }
+        // Try partial
+        const partial = [...document.querySelectorAll('div, span, button, [role="option"], [role="menuitem"]')].filter(el => {
+          const t = el.textContent.trim();
+          return t.includes(sz) && t.length < 20 && el.getBoundingClientRect().height > 0;
+        });
+        if (partial.length > 0) { partial[0].click(); return partial[0].textContent.trim(); }
+        // List what's available in the dropdown
+        const visible = [...document.querySelectorAll('[role="option"], [role="menuitem"], [role="radio"], [role="listbox"] *, [role="menu"] *')].filter(el => el.getBoundingClientRect().height > 0 && el.textContent.trim().length > 1 && el.textContent.trim().length < 20).map(el => el.textContent.trim());
+        return { error: 'option not found', visible: [...new Set(visible)].slice(0, 10) };
+      }, targetSize);
+      if (typeof picked === 'string') {
+        console.log(`    size: ${picked} (from dropdown)`);
+      } else {
+        console.log(`    ⚠ size "${targetSize}" not in dropdown, visible: ${JSON.stringify(picked.visible)}`);
+      }
+    } else {
+      console.log(`    ⚠ size "${targetSize}" not found: ${sizeClicked.error}`);
+    }
+    await page.waitForTimeout(2500);
   }
 
   // Select crust if specified (手拍, 鬆厚, 經典, 帕瑪滋心, etc.)
+  // Must search WITHIN the modal only (scoped to the dialog containing "增加到訂單中")
   if (crust) {
-    await page.evaluate((c) => {
-      const els = [...document.querySelectorAll('div, span, button')].filter(el =>
-        el.textContent.trim().includes(c) && el.children.length <= 2 && el.getBoundingClientRect().height > 0
-      );
-      if (els.length > 0) { els.sort((a,b) => a.textContent.length - b.textContent.length); els[0].click(); }
+    const crustResult = await page.evaluate((c) => {
+      // Find the modal container by locating "增加到訂單中" button and going up
+      const addBtn = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中' && el.getBoundingClientRect().height > 0);
+      if (!addBtn) return { clicked: null, error: 'no modal found' };
+      const modal = addBtn.closest('[role="dialog"]') || addBtn.closest('[data-testid*="modal"]') || addBtn.parentElement?.parentElement?.parentElement?.parentElement?.parentElement?.parentElement;
+      if (!modal) return { clicked: null, error: 'no modal container' };
+      // Search for crust option within modal only
+      const els = [...modal.querySelectorAll('div, span, button, [role="radio"], [role="tab"]')].filter(el => {
+        const t = el.textContent.trim();
+        return t.includes(c) && t.length < 20 && el.children.length <= 2 && el.getBoundingClientRect().height > 0;
+      });
+      if (els.length > 0) {
+        els.sort((a,b) => a.textContent.length - b.textContent.length);
+        els[0].click();
+        return { clicked: els[0].textContent.trim(), count: els.length };
+      }
+      // Dump ALL short text elements in modal for debugging
+      const allOptions = [...modal.querySelectorAll('div, span, [role="radio"], [role="tab"]')].filter(el => {
+        const t = el.textContent.trim();
+        return el.getBoundingClientRect().height > 0 && t.length >= 2 && t.length < 20 && el.children.length <= 1;
+      }).map(el => el.textContent.trim());
+      const unique = [...new Set(allOptions)];
+      return { clicked: null, available: unique.slice(0, 30) };
     }, crust);
-    await page.waitForTimeout(500);
+    if (crustResult.clicked) {
+      console.log(`    crust: ${crustResult.clicked}`);
+    } else {
+      console.log(`    ⚠ crust "${crust}" not found in modal, available: ${JSON.stringify(crustResult.available || crustResult.error)}`);
+    }
+    await page.waitForTimeout(1000);
   }
   await page.waitForTimeout(800);
 
@@ -1028,9 +1079,30 @@ async function addPizza(name, opts = {}) {
 // Add each selected pizza (exact mode or constraint mode)
 let addedCount = 0;
 if (exactOrder) {
-  for (const pizza of exactOrder.pizzas) {
-    const ok = await addPizza(pizza.name, { size: pizza.size, crust: pizza.crust });
-    if (ok) addedCount++;
+  // Split pizzas: 大 pizzas go through deal-builder (if voucher active), others added normally
+  const dealPizzas = promoUsed ? exactOrder.pizzas.filter(p => p.size === '大') : [];
+  const normalPizzas = promoUsed ? exactOrder.pizzas.filter(p => p.size !== '大') : exactOrder.pizzas;
+
+  if (dealPizzas.length > 0) {
+    console.log(`  [Deal-Builder] Adding ${dealPizzas.length} 大 pizzas via voucher...`);
+    for (const pizza of dealPizzas) {
+      // In deal-builder mode, size is forced to 大/手拍 — just find and click the pizza
+      const ok = await addPizza(pizza.name, { size: null, crust: pizza.crust });
+      if (ok) addedCount++;
+    }
+    // Wait for deal-builder to complete/close
+    await page.waitForTimeout(2000);
+  }
+
+  if (normalPizzas.length > 0) {
+    console.log(`  [Normal] Adding ${normalPizzas.length} non-deal pizzas...`);
+    // Make sure we're on the regular pizza menu (not deal-builder)
+    await page.goto('https://order.dominos.com.tw/menu/pizza', { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.waitForTimeout(3000);
+    for (const pizza of normalPizzas) {
+      const ok = await addPizza(pizza.name, { size: pizza.size, crust: pizza.crust });
+      if (ok) addedCount++;
+    }
   }
 } else {
   for (const pizza of selectedPizzas) {
@@ -1116,6 +1188,18 @@ if (exactOrder && exactOrder.sides.length > 0) {
     if (sideName.includes('雞條')) keywords.push('雞條');
     if (sideName.includes('星星')) keywords.push('星星');
     if (sideName.length >= 4) keywords.push(sideName.substring(0, 3));
+
+    // Ensure we're on the sides page (re-navigate if needed after previous item's modal)
+    const onSides = await page.evaluate(() => {
+      const sideItems = [...document.querySelectorAll('[data-testid*="product"]')].filter(el =>
+        el.getBoundingClientRect().height > 0 && el.textContent.includes('NT$')
+      );
+      return sideItems.length >= 3;
+    });
+    if (!onSides) {
+      await navigateToSides();
+      await page.waitForTimeout(2000);
+    }
 
     // Scroll and search for the item
     await page.evaluate(() => window.scrollTo(0, 0));
@@ -1328,23 +1412,52 @@ if (constraints.wantSide && !exactOrder) {
   await page.waitForTimeout(2000);
 }
 
-// Auto-apply coupons at checkout — look for available vouchers in the order summary
-if (exactOrder && exactOrder.wantCoupon) {
+// Auto-apply coupons at checkout — SKIP if already applied at menu level (promoUsed)
+if (exactOrder && exactOrder.wantCoupon && !promoUsed) {
   console.log('  [Coupon] Checking for available vouchers at checkout...');
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(2000);
+  // Debug: dump all visible text related to coupons/vouchers on checkout page
+  const couponDebug = await page.evaluate(() => {
+    const keywords = ['優惠', '折扣', '券', 'coupon', 'voucher', 'promo', '新增', '套用'];
+    const found = [];
+    const allEls = document.querySelectorAll('*');
+    for (const el of allEls) {
+      if (el.children.length > 3) continue; // skip containers
+      const t = el.textContent.trim();
+      if (t.length < 2 || t.length > 60) continue;
+      if (el.getBoundingClientRect().height === 0) continue;
+      if (keywords.some(k => t.includes(k))) {
+        const tag = el.tagName.toLowerCase();
+        const role = el.getAttribute('role') || '';
+        const cls = el.className?.toString()?.substring(0, 30) || '';
+        found.push(`[${tag}${role ? ' role=' + role : ''}] "${t}" (${cls})`);
+      }
+    }
+    return found.slice(0, 20);
+  });
+  console.log('    [Debug] Coupon-related elements on checkout:');
+  couponDebug.forEach(d => console.log(`      ${d}`));
+  await page.screenshot({ path: `${SS}/coupon-debug.png` });
+
   // Look for "新增優惠券" or voucher section and click to expand/apply
   const couponResult = await page.evaluate(() => {
-    // Strategy 1: Find "新增優惠券" button (same as on menu page)
-    const addCouponBtns = [...document.querySelectorAll('button')].filter(el =>
+    // Strategy 1: Find "新增優惠券" button
+    const addCouponBtns = [...document.querySelectorAll('button, [role="button"]')].filter(el =>
       el.textContent.trim() === '新增優惠券' && el.getBoundingClientRect().height > 0
     );
     if (addCouponBtns.length > 0) { addCouponBtns[0].click(); return 'clicked:新增優惠券'; }
-    // Strategy 2: Look for expandable coupon/voucher section
-    const expandBtn = [...document.querySelectorAll('div, button, [role="button"]')].find(el => {
+    // Strategy 2: Look for any clickable element with coupon-related text
+    const expandBtn = [...document.querySelectorAll('div, button, span, a, [role="button"]')].find(el => {
       const t = el.textContent.trim();
-      return (t.includes('優惠券') || t.includes('折扣') || t.includes('新增優惠') || t.includes('查看可用')) && t.length < 30 && el.getBoundingClientRect().height > 0;
+      if (t.length < 2 || t.length > 40) return false;
+      if (el.getBoundingClientRect().height === 0) return false;
+      if (el.children.length > 3) return false;
+      return t.includes('優惠券') || t.includes('折扣碼') || t.includes('新增優惠') || t.includes('查看可用') || t === '優惠' || t.includes('使用優惠');
     });
     if (expandBtn) { expandBtn.click(); return 'expanded:' + expandBtn.textContent.trim(); }
+    // Strategy 3: Look for input field for coupon code
+    const couponInput = document.querySelector('input[placeholder*="優惠"], input[placeholder*="折扣"], input[placeholder*="coupon"]');
+    if (couponInput) return 'input_found';
     return 'no_coupon_ui';
   });
   console.log(`    Coupon: ${couponResult}`);
@@ -1631,28 +1744,57 @@ console.log(`  Gateway amount: ${payAmount}`);
 // Submit payment if --submit flag
 if (SUBMIT_PAYMENT) {
   console.log('  Submitting payment...');
-  await page.evaluate(() => {
-    const btn = [...document.querySelectorAll('input[type="submit"], button[type="submit"], input[type="image"]')].find(el => el.getBoundingClientRect().height > 0);
-    if (btn) btn.click();
+  // Auto-accept any confirmation dialogs (e.g. "確認付款?")
+  page.on('dialog', async dialog => {
+    console.log(`  Dialog: "${dialog.message()}" → accepting`);
+    await dialog.accept();
   });
+  // Debug: show all clickable elements on payment page
+  const payBtns = await page.evaluate(() => {
+    const els = [...document.querySelectorAll('input[type="submit"], button[type="submit"], input[type="image"], input[type="button"], button, a')].filter(el => el.getBoundingClientRect().height > 0);
+    return els.map(el => ({ tag: el.tagName, type: el.type, value: el.value, text: el.textContent?.trim()?.substring(0, 30), name: el.name }));
+  });
+  console.log('  Payment page buttons:', JSON.stringify(payBtns));
+  // Click submit
+  const clicked = await page.evaluate(() => {
+    const btn = [...document.querySelectorAll('input[type="submit"], button[type="submit"], input[type="image"]')].find(el => el.getBoundingClientRect().height > 0);
+    if (btn) { btn.click(); return btn.tagName + ':' + (btn.value || btn.name || btn.textContent?.trim()); }
+    // Fallback: any input[type="button"] or button
+    const fallback = [...document.querySelectorAll('input[type="button"], button')].find(el => el.getBoundingClientRect().height > 0 && (el.value?.includes('Pay') || el.value?.includes('Submit') || el.textContent?.includes('Pay') || el.textContent?.includes('Submit')));
+    if (fallback) { fallback.click(); return 'fallback:' + (fallback.value || fallback.textContent?.trim()); }
+    return null;
+  });
+  console.log(`  Clicked: ${clicked}`);
   // Wait for 3DS verification — StraitsX auto-approves but it takes time
-  console.log('  Waiting for 3DS verification (auto-approved by StraitsX, up to 60s)...');
-  await page.waitForTimeout(10000);
+  console.log('  Waiting for navigation after submit...');
+  try {
+    await page.waitForURL(url => !url.toString().includes('payForm'), { timeout: 30000 });
+  } catch(e) {
+    // May already have navigated
+  }
+  console.log('  Post-submit URL:', page.url());
+  await page.waitForTimeout(5000);
   await page.screenshot({ path: `${SS}/smart-3ds.png` });
-  // Check if we're on a 3DS page and wait for redirect
-  const is3ds = page.url().includes('3ds') || page.url().includes('acs') || page.url().includes('secure') || await page.evaluate(() => document.body.innerText.includes('驗證') || document.body.innerText.includes('Verification') || document.body.innerText.includes('OTP'));
+  // Check if we're on a 3DS page and wait for redirect back to Domino's
+  const currentUrl = page.url();
+  const is3ds = currentUrl.includes('3ds') || currentUrl.includes('acs') || currentUrl.includes('secure') || currentUrl.includes('paydollar');
   if (is3ds) {
     console.log('  3DS page detected, waiting for auto-approval (up to 90s)...');
     try {
-      await page.waitForURL(url => !url.toString().includes('3ds') && !url.toString().includes('acs') && !url.toString().includes('secure'), { timeout: 90000 });
+      await page.waitForURL(url => url.toString().includes('dominos') || url.toString().includes('order'), { timeout: 90000 });
     } catch(e) {
       console.log('  3DS wait timed out, checking current state...');
     }
-  } else {
-    await page.waitForTimeout(5000);
   }
+  await page.waitForTimeout(3000);
   await page.screenshot({ path: `${SS}/smart-submitted.png` });
-  console.log('  Payment submitted! URL:', page.url());
+  console.log('  Final URL:', page.url());
+  try {
+    const finalText = await page.evaluate(() => document.body.innerText.substring(0, 300));
+    console.log('  Page text:', finalText.replace(/\n/g, ' '));
+  } catch(e) {
+    console.log('  (could not read page text)');
+  }
 }
 
 // ============================================================
@@ -1670,9 +1812,8 @@ console.log(`  Seafood check: ${constraints.noSeafood ? (itemNames.some(n => SEA
 console.log(`  Drink: ${constraints.wantCola ? (itemNames.some(n => /可樂|雪碧|芬達|奶茶|紅茶|綠茶|檸檬|汽水|果汁|舒跑|L/.test(n)) ? 'PASS ✓' : 'FAIL ✗') : 'N/A'}`);
 console.log(`  Side: ${constraints.wantSide ? (itemNames.length > selectedPizzas.length + (constraints.wantCola ? 1 : 0) ? 'PASS ✓' : 'FAIL ✗') : 'N/A'}`);
 console.log(`  Card: ${CARD_NUMBER.length === 16 ? 'PASS ✓' : 'FAIL ✗'} (${CARD_NUMBER.substring(0,4)}***)`);
-console.log(`  Payment: Card filled, NOT submitted ✓`);
+console.log(`  Payment: ${SUBMIT_PAYMENT ? 'SUBMITTED ✓' : 'Card filled, NOT submitted ✓'}`);
 console.log(`${'═'.repeat(55)}\n`);
 
-console.log('Browser open 30s for inspection...');
-await page.waitForTimeout(SUBMIT_PAYMENT ? 30000 : 10000);
-await browser.close();
+console.log('Browser open for inspection (press Ctrl+C to close)...');
+await new Promise(() => {});

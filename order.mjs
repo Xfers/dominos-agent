@@ -96,6 +96,61 @@ function parsePrompt(prompt) {
 const constraints = parsePrompt(PROMPT);
 console.log('Constraints:', JSON.stringify(constraints, null, 2));
 
+// ============================================================
+// EXACT ORDER MODE: detect when user specifies exact items
+// ============================================================
+function parseExactOrder(prompt) {
+  const cnNum = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10,'十一':11,'十二':12};
+  const segments = prompt.split(/[、，]/);
+
+  // Pizzas: "name + 大/小/中 + 的餅皮 + crust" or "name + 大/小/中 + 的"
+  const pizzas = [];
+  for (const seg of segments) {
+    const m = seg.match(/(?:我要|要)?(.+?)(大|小|中)的(?:餅皮(.+))?/);
+    if (m && m[1].length >= 2 && m[1].length <= 15) {
+      pizzas.push({ name: m[1].trim(), size: m[2], crust: (m[3] || '').trim() });
+    }
+  }
+
+  // Sides: after 副餐 keyword
+  const sides = [];
+  const sideSegIdx = segments.findIndex(s => s.includes('副餐'));
+  if (sideSegIdx >= 0) {
+    let sideText = segments[sideSegIdx].replace(/^.*副餐/, '').trim();
+    sides.push(...sideText.split(/跟|和/).filter(s => s.length > 1));
+    for (let i = sideSegIdx + 1; i < segments.length; i++) {
+      if (/可樂|飲料|外送|外帶|優惠|禮拜|星期/.test(segments[i])) break;
+      sides.push(...segments[i].split(/跟|和/).filter(s => s.length > 1));
+    }
+  }
+
+  // Time: 禮拜X晚上Y點
+  let desiredDay = '', desiredHour = 0;
+  const dayMap = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'日':7,'天':7};
+  const timeMatch = prompt.match(/(禮拜|星期|週)([一二三四五六日天]).*?(?:晚上|下午|傍晚|上午|中午|早上)?([一二三四五六七八九十\d]+)[點時]/);
+  if (timeMatch) {
+    desiredDay = timeMatch[2];
+    desiredHour = parseInt(timeMatch[3]) || cnNum[timeMatch[3]] || 0;
+    if (/晚上|傍晚|下午/.test(prompt) && desiredHour < 12) desiredHour += 12;
+  }
+
+  // Coupon: 自動套用優惠券
+  const wantCoupon = /優惠券|優惠碼|coupon|自動套用/i.test(prompt);
+
+  if (pizzas.length === 0) return null;
+  return { pizzas, sides, desiredDay, desiredHour, wantCoupon };
+}
+
+const exactOrder = parseExactOrder(PROMPT);
+if (exactOrder) {
+  console.log('\n*** EXACT ORDER MODE ***');
+  console.log('Pizzas:', JSON.stringify(exactOrder.pizzas));
+  console.log('Sides:', exactOrder.sides);
+  if (exactOrder.desiredHour) console.log(`Time: 禮拜${exactOrder.desiredDay} ${exactOrder.desiredHour}:00`);
+  if (exactOrder.wantCoupon) console.log('Coupon: will auto-apply');
+  console.log('');
+}
+
 // Decide pizza count based on people (or explicit request)
 function decidePizzaCount(people, explicitPizzaCount) {
   const byPeople = people <= 2 ? 1 : people <= 4 ? 2 : people <= 6 ? 3 : Math.ceil(people / 2);
@@ -297,48 +352,133 @@ if (constraints.isDelivery) {
   try {
     await page.getByText('外送', { exact: true }).first().click();
     await page.waitForTimeout(2000);
-    const addrInput = page.locator('input[placeholder*="輸入"]').first();
+    const addrInput = page.locator('[data-testid="delivery-address-search.search-input"] input, input[placeholder*="輸入"]').first();
     await addrInput.click();
     await page.waitForTimeout(500);
     // Extract address from prompt or use .env USER_ADDRESS
     const addrMatch = PROMPT.match(/送到(.+?)(?:、|$|，)/) || PROMPT.match(/外送到(.+?)(?:、|$|，)/);
     let addr = addrMatch ? addrMatch[1] : USER_ADDRESS;
     if (/指定|地址|家|公司|預先/.test(addr)) addr = USER_ADDRESS;
+    // For autocomplete: extract street portion (remove zip, 台灣, 臺北市, 區 prefix)
+    let searchAddr = addr.replace(/^\d{3,5}/, '').replace(/^台灣/, '').replace(/^臺北市|^台北市/, '').replace(/^.{2,3}區/, '').replace(/\d+樓.*$/, '').trim();
+    if (!searchAddr || searchAddr.length < 3) searchAddr = addr;
     console.log(`    Address: ${addr}`);
-    await addrInput.fill(addr);
-    await page.waitForTimeout(4000);
-    // Click the first address suggestion that contains 台灣 and our search term
-    await page.evaluate((searchTerm) => {
-      const d = [...document.querySelectorAll('div')].filter(el => {
-        const t = el.textContent.trim();
-        return t.includes('台灣') && t.includes('臺北') && el.children.length <= 3 && t.length < 50;
-      });
-      if (d.length > 0) { d.sort((a,b) => a.textContent.length - b.textContent.length); d[0].click(); return; }
-      // Fallback: any suggestion with 台灣
-      const d2 = [...document.querySelectorAll('div')].filter(el => el.textContent.trim().includes('台灣') && el.children.length <= 3 && el.textContent.trim().length < 50);
-      d2.sort((a,b) => a.textContent.length - b.textContent.length);
-      if (d2[0]) d2[0].click();
-    }, addr);
-    await page.waitForTimeout(5000);
+    console.log(`    Search term: ${searchAddr}`);
+    await addrInput.fill(searchAddr);
+    await page.waitForTimeout(3000);
+    // Click the address prediction option button
+    const predOption = page.locator('[data-testid="delivery-address-predictions-results.options.option"]').first();
+    const predExists = await predOption.count();
+    if (predExists > 0) {
+      const predText = await predOption.textContent();
+      console.log(`    Prediction: ${predText.substring(0, 50)}`);
+      await predOption.click();
+    } else {
+      // Fallback: click suggestion by text match
+      await page.evaluate((searchTerm) => {
+        const d = [...document.querySelectorAll('button, div')].filter(el => {
+          const t = el.textContent.trim();
+          return t.includes(searchTerm.substring(0, 8)) && t.length < 80 && el.getBoundingClientRect().height > 0;
+        });
+        d.sort((a, b) => a.textContent.length - b.textContent.length);
+        if (d[0]) d[0].click();
+      }, searchAddr);
+    }
+    await page.waitForTimeout(3000);
+
+    // Confirm address page: fill floor number field and click 選擇地址
+    const confirmBtn = page.locator('[data-testid="confirm-address.button"]');
+    for (let w = 0; w < 8; w++) {
+      if (await confirmBtn.count() > 0) break;
+      await page.waitForTimeout(1000);
+    }
+    if (await confirmBtn.count() > 0) {
+      const floorMatch = addr.match(/(\d+)樓/);
+      if (floorMatch) {
+        const floorInput = page.locator('[data-testid="address-field-floorNumber"] input').first();
+        if (await floorInput.count() > 0) {
+          await floorInput.fill(floorMatch[1]);
+          console.log(`    Floor: ${floorMatch[1]}`);
+        }
+      }
+      await confirmBtn.click();
+      console.log('    Confirmed address');
+      await page.waitForTimeout(4000);
+    }
 
     // Wait for either start-now or start-later button
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 12; i++) {
       const hasNow = await page.locator('[data-testid="start-order-now-button"]').count();
       const hasLater = await page.locator('[data-testid="start-order-later-button"]').count();
       if (hasNow > 0 || hasLater > 0) break;
+      // Also check for "外送 預約" expander button
+      const hasExpander = await page.locator('[data-testid="order-later-expander-button"]').count();
+      if (hasExpander > 0) {
+        await page.locator('[data-testid="order-later-expander-button"]').click({ force: true });
+        await page.waitForTimeout(1500);
+        const hasLater2 = await page.locator('[data-testid="start-order-later-button"]').count();
+        if (hasLater2 > 0) break;
+      }
       await page.waitForTimeout(1500);
     }
 
+    // Debug: what's visible now
+    const deliveryDebug = await page.evaluate(() => {
+      const btns = [...document.querySelectorAll('button, [role="button"], [data-testid]')].filter(el => el.getBoundingClientRect().height > 0).map(el => ({
+        text: el.textContent.trim().substring(0, 50), testId: el.getAttribute('data-testid')
+      })).filter(b => b.testId || b.text.length < 40).slice(0, 15);
+      return btns;
+    });
+    console.log('    Delivery buttons:', JSON.stringify(deliveryDebug.filter(b => /start|order|預約|外送/.test(b.text + (b.testId || '')))));
+
     const hasNowBtn = await page.locator('[data-testid="start-order-now-button"]').count();
-    if (hasNowBtn > 0) {
-      await page.locator('[data-testid="start-order-now-button"]').click({ force: true });
-    } else {
-      console.log('    Store closed → selecting delivery time');
-      let desiredHour = 0;
+    const hasLaterBtn = await page.locator('[data-testid="start-order-later-button"]').count();
+    // Check if user wants a scheduled time
+    let wantScheduled = false;
+    let desiredHour = exactOrder ? exactOrder.desiredHour : 0;
+    let desiredDay = exactOrder ? exactOrder.desiredDay : '';
+    if (!desiredHour) {
       const timeMatch2 = PROMPT.match(/(\d{1,2})\s*[點:時]/);
       if (timeMatch2) desiredHour = parseInt(timeMatch2[1]);
       else if (constraints.isLunch) desiredHour = 12;
       else if (constraints.isDinner) desiredHour = 18;
+    }
+    if (desiredDay || desiredHour) wantScheduled = true;
+
+    if (hasNowBtn > 0 && !wantScheduled) {
+      await page.locator('[data-testid="start-order-now-button"]').click({ force: true });
+    } else {
+      console.log(`    Scheduling: ${desiredDay || 'today'} ${desiredHour || 'ASAP'}:00`);
+      // Click expander to reveal scheduling UI
+      const expander = page.locator('[data-testid="order-later-expander-button"]');
+      if (await expander.count() > 0) {
+        await expander.click({ force: true });
+        await page.waitForTimeout(2000);
+      }
+
+      // Select day if specified (e.g. 禮拜五 → 星期五, or just "五")
+      if (desiredDay) {
+        const dayMatch = desiredDay.match(/[禮星期週周].*?([一二三四五六日天])/) || desiredDay.match(/([一二三四五六日天])/);
+        const targetDayChar = dayMatch ? dayMatch[1] : '';
+        const targetDayName = targetDayChar ? '星期' + targetDayChar : '';
+        if (targetDayName) {
+          const dateSelect = page.locator('[data-testid="OrderLaterContainer-OrderDate-select"]');
+          if (await dateSelect.count() > 0) {
+            await dateSelect.click();
+            await page.waitForTimeout(1500);
+            const dayClicked = await page.evaluate((target) => {
+              const opts = [...document.querySelectorAll('[role="option"], div, span, li')].filter(el =>
+                el.textContent.trim().includes(target) && el.getBoundingClientRect().height > 0 && el.textContent.trim().length < 30
+              );
+              opts.sort((a, b) => a.textContent.trim().length - b.textContent.trim().length);
+              if (opts[0]) { opts[0].click(); return opts[0].textContent.trim(); }
+              return null;
+            }, targetDayName);
+            console.log(`    Day selected: ${dayClicked || 'not found'}`);
+            await page.waitForTimeout(1500);
+          }
+        }
+      }
 
       const timeSelect = page.locator('[data-testid="OrderLaterContainer-OrderTime-select"]');
       if (await timeSelect.count() > 0) {
@@ -434,12 +574,13 @@ if (!storeOk) {
     await page.locator('[data-testid="start-order-now-button"]').click({ force: true });
   } else {
     console.log('    Store closed → selecting time for 預約');
-    // Parse desired time from prompt
-    let desiredHour = 0;
-    const timeMatch = PROMPT.match(/(\d{1,2})\s*[點:時]/);
-    if (timeMatch) desiredHour = parseInt(timeMatch[1]);
-    else if (constraints.isLunch) desiredHour = 12;
-    else if (constraints.isDinner) desiredHour = 18;
+    let desiredHour = exactOrder ? exactOrder.desiredHour : 0;
+    if (!desiredHour) {
+      const timeMatch = PROMPT.match(/(\d{1,2})\s*[點:時]/);
+      if (timeMatch) desiredHour = parseInt(timeMatch[1]);
+      else if (constraints.isLunch) desiredHour = 12;
+      else if (constraints.isDinner) desiredHour = 18;
+    }
 
     // Select time
     const timeSelect = page.locator('[data-testid="OrderLaterContainer-OrderTime-select"]');
@@ -491,69 +632,87 @@ async function scanPromos() {
   await page.goto('https://order.dominos.com.tw/menu/deals', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
   await page.waitForTimeout(3000);
 
-  // Scroll to load all promo sections
-  for (let i = 0; i < 8; i++) {
-    await page.evaluate(() => window.scrollBy(0, 500));
-    await page.waitForTimeout(400);
-  }
+  // Click through each promo tab to load content
+  const TABS = ['當期主打', '精選套餐', '自由任你配', '專屬優惠'];
+  const allPromoItems = [];
 
-  // Extract all visible promotions with their names and prices
-  const promos = await page.evaluate(() => {
-    const results = [];
-    const seen = new Set();
-    const allText = document.body.innerText;
-    const lines = allText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  for (const tabName of TABS) {
+    const tabClicked = await page.evaluate((name) => {
+      const tabs = [...document.querySelectorAll('div, span, button, a')].filter(el =>
+        el.textContent.trim() === name && el.children.length <= 2 && el.getBoundingClientRect().height > 0
+      );
+      if (tabs[0]) { tabs[0].click(); return true; }
+      return false;
+    }, tabName);
 
-    // Look for promo patterns: "買大送大", "套餐", "任你配", etc.
-    const PROMO_PATTERNS = ['買大送大', '買一送一', '大披薩', '套餐', '任你配', '優惠', '起'];
-    const SECTION_NAMES = ['當期主打', '精選套餐', '自由任你配', '專屬優惠', '超值', '限時'];
+    if (!tabClicked) continue;
+    await page.waitForTimeout(2000);
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      // Detect promo items: lines with price that contain promo keywords
-      if (PROMO_PATTERNS.some(p => line.includes(p)) || (line.includes('NT$') && line.includes('起'))) {
-        const priceMatch = line.match(/NT\$(\d+)/);
-        if (priceMatch && !seen.has(line)) {
-          results.push({ text: line, price: parseInt(priceMatch[1]), line: i });
-          seen.add(line);
-        }
-      }
-      // Also check if current line is a promo name and next lines have price
-      if (line.length >= 4 && line.length <= 40 && PROMO_PATTERNS.some(p => line.includes(p)) && !line.includes('NT$')) {
-        for (let j = 1; j <= 3; j++) {
-          if (i + j < lines.length && lines[i + j].includes('NT$')) {
-            const pm = lines[i + j].match(/NT\$(\d+)/);
-            if (pm && !seen.has(line)) {
-              results.push({ text: line, price: parseInt(pm[1]), line: i });
-              seen.add(line);
+    // Scroll to load items in this tab
+    for (let i = 0; i < 5; i++) {
+      await page.evaluate(() => window.scrollBy(0, 500));
+      await page.waitForTimeout(300);
+    }
+
+    // Extract promo items from current tab view
+    const tabItems = await page.evaluate((tab) => {
+      const items = [];
+      const seen = new Set();
+      const allText = document.body.innerText;
+      const lines = allText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // Look for promo deal names with prices
+        if (line.length >= 4 && line.length <= 60 && !line.match(/^NT\$/) && !seen.has(line)) {
+          // Check if next few lines have a price
+          for (let j = 0; j <= 3; j++) {
+            const checkLine = j === 0 ? line : (i + j < lines.length ? lines[i + j] : '');
+            const priceMatch = checkLine.match(/NT\$(\d+)/);
+            if (priceMatch) {
+              const name = j === 0 ? line.split('NT$')[0].trim() : line;
+              if (name.length >= 4 && name.length <= 50) {
+                items.push({ name, price: parseInt(priceMatch[1]), tab });
+                seen.add(name);
+              }
+              break;
             }
-            break;
           }
         }
       }
+
+      // Also look for deal cards with specific patterns
+      const DEAL_PATTERNS = ['買大送大', '買一送一', '套餐', '任你配', '起', '優惠', '加購'];
+      const cards = [...document.querySelectorAll('[role="button"], button, a')].filter(el => {
+        const t = el.textContent.trim();
+        return DEAL_PATTERNS.some(p => t.includes(p)) && t.length > 5 && t.length < 150 && el.getBoundingClientRect().height > 0;
+      }).map(el => {
+        const t = el.textContent.trim();
+        const pm = t.match(/NT\$(\d+)/);
+        return { name: t.substring(0, 60), price: pm ? parseInt(pm[1]) : 0, tab };
+      }).filter(c => !seen.has(c.name));
+
+      return { items, cards };
+    }, tabName);
+
+    allPromoItems.push(...tabItems.items, ...tabItems.cards);
+    if (tabItems.items.length > 0 || tabItems.cards.length > 0) {
+      console.log(`  [${tabName}] ${tabItems.items.length} items, ${tabItems.cards.length} cards`);
     }
+  }
 
-    // Also look for clickable promo cards/sections
-    const promoCards = [...document.querySelectorAll('[data-testid*="deal"], [data-testid*="promo"], [data-testid*="coupon"], [role="button"]')].filter(el => {
-      const t = el.textContent.trim();
-      return (PROMO_PATTERNS.some(p => t.includes(p)) || SECTION_NAMES.some(s => t.includes(s))) && t.length < 200 && el.getBoundingClientRect().height > 0;
-    }).map(el => ({ text: el.textContent.trim().substring(0, 80), hasPrice: /NT\$\d+/.test(el.textContent) }));
-
-    // Detect section tabs/navigation
-    const tabs = [...document.querySelectorAll('div, span, a, button')].filter(el => {
-      const t = el.textContent.trim();
-      return SECTION_NAMES.some(s => t === s) && el.children.length <= 2 && el.getBoundingClientRect().height > 0;
-    }).map(el => el.textContent.trim());
-
-    return { promos: results, cards: promoCards.slice(0, 10), tabs };
+  // Deduplicate
+  const seen = new Set();
+  const promos = allPromoItems.filter(p => {
+    if (seen.has(p.name)) return false;
+    seen.add(p.name);
+    return true;
   });
 
-  console.log(`  Found ${promos.promos.length} promo items, ${promos.cards.length} promo cards`);
-  if (promos.tabs.length > 0) console.log(`  Promo tabs: ${promos.tabs.join(', ')}`);
-  promos.promos.forEach(p => console.log(`    ${p.text} (NT$${p.price})`));
-  promos.cards.slice(0, 5).forEach(c => console.log(`    [Card] ${c.text}`));
+  console.log(`  Total promos found: ${promos.length}`);
+  promos.slice(0, 8).forEach(p => console.log(`    ${p.tab}: ${p.name} ${p.price ? '(NT$' + p.price + ')' : ''}`));
 
-  return promos;
+  return { promos, tabs: TABS };
 }
 
 const pizzaCount = decidePizzaCount(constraints.people, constraints.explicitPizzaCount);
@@ -563,11 +722,11 @@ if (pizzaCount >= 2) {
   const promos = await scanPromos();
 
   // Look for BOGO-type deals (買大送大, 買一送一) that fit our budget
-  const bogoPromos = promos.promos.filter(p => /買大送大|買一送一|兩個大披薩/.test(p.text));
-  const comboPromos = promos.promos.filter(p => /套餐|任你配/.test(p.text));
+  const bogoPromos = promos.promos.filter(p => /買大送大|買一送一|兩個大披薩/.test(p.name));
+  const comboPromos = promos.promos.filter(p => /套餐|任你配/.test(p.name));
 
   if (bogoPromos.length > 0) {
-    console.log(`  → BOGO deal available: ${bogoPromos[0].text}`);
+    console.log(`  → BOGO deal available: ${bogoPromos[0].name}`);
     // Try to use the BOGO deal by clicking it on the deals page
     const bogoClicked = await page.evaluate((bogoText) => {
       const els = [...document.querySelectorAll('div, span, [role="button"], button')].filter(el => {
@@ -584,7 +743,7 @@ if (pizzaCount >= 2) {
       }
       if (els[0]) { els[0].click(); return els[0].textContent.trim().substring(0, 50); }
       return null;
-    }, bogoPromos[0].text);
+    }, bogoPromos[0].name);
 
     if (bogoClicked) {
       console.log(`    Clicked: "${bogoClicked}"`);
@@ -608,14 +767,14 @@ if (pizzaCount >= 2) {
       }
     }
   } else if (comboPromos.length > 0) {
-    console.log(`  → Combo deal available: ${comboPromos[0].text}`);
+    console.log(`  → Combo deal available: ${comboPromos[0].name}`);
   }
 
   if (!promoUsed) {
     console.log('  → No usable promo applied, will use regular menu ordering');
     // Also check if there's a coupon code we can apply later at checkout
-    const couponInfo = promos.promos.filter(p => /優惠碼|折扣碼|coupon/i.test(p.text));
-    if (couponInfo.length > 0) console.log(`  → Coupon codes found: ${couponInfo.map(c => c.text).join(', ')}`);
+    const couponInfo = promos.promos.filter(p => /優惠碼|折扣碼|coupon/i.test(p.name));
+    if (couponInfo.length > 0) console.log(`  → Coupon codes found: ${couponInfo.map(c => c.name).join(', ')}`);
   }
 } else {
   console.log('  Skipping promos (single pizza order)');
@@ -625,18 +784,99 @@ if (pizzaCount >= 2) {
 if (!promoUsed) {
   // Navigate to menu and check for promo banner/coupon input
   await page.goto('https://order.dominos.com.tw/menu/pizza', { waitUntil: 'domcontentloaded', timeout: 15000 });
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(3000);
 
-  // Check for coupon/promo code input field and auto-apply if available
-  const couponApplied = await page.evaluate(() => {
-    // Look for "新增優惠券" or coupon input
-    const couponBtn = [...document.querySelectorAll('div, span, button')].find(el =>
-      (el.textContent.trim() === '新增優惠券' || el.textContent.trim() === '增加優惠碼') &&
-      el.children.length <= 2 && el.getBoundingClientRect().height > 0
-    );
-    return couponBtn ? couponBtn.textContent.trim() : null;
-  });
-  if (couponApplied) console.log(`  Coupon input available: "${couponApplied}" (will check at checkout)`);
+  // Apply voucher: click "新增優惠券" on the voucher card (e.g. "買大送大")
+  // The voucher cards are at the top of the pizza menu with testId like "menu-scene.pizza.Voucher.*.lovable-menu"
+  if (exactOrder && exactOrder.wantCoupon) {
+    console.log('  [Voucher] Applying deal from pizza menu page...');
+    // Scroll to top to ensure voucher cards are visible
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(2000);
+
+    const voucherApplied = await page.evaluate(() => {
+      // Find voucher cards (testId contains "Voucher")
+      const voucherCards = [...document.querySelectorAll('[data-testid*="Voucher"][data-testid*="lovable-menu"]')];
+      if (voucherCards.length === 0) return { found: false, debug: 'no voucher cards with testId' };
+      // Prefer "買大送小" or "買大送大" voucher
+      const targetVoucher = voucherCards.find(el => {
+        const t = el.textContent || '';
+        return t.includes('買大送小') || t.includes('買大送大');
+      }) || voucherCards[0];
+      const btn = targetVoucher.querySelector('button');
+      if (btn) { btn.click(); return { found: true, text: targetVoucher.textContent.trim().substring(0, 40), method: 'button' }; }
+      targetVoucher.click();
+      return { found: true, text: targetVoucher.textContent.trim().substring(0, 40), method: 'card-click' };
+    });
+
+    if (voucherApplied.found) {
+      console.log(`    Clicked voucher: ${voucherApplied.text} (${voucherApplied.method})`);
+      await page.waitForTimeout(3000);
+
+      // After clicking "新增優惠券", a voucher selection modal/overlay may appear
+      // Look for "外送買大送小" or similar deal option and select it
+      const dealSelected = await page.evaluate(() => {
+        // Look for deal options in the opened modal/overlay
+        const dealKeywords = ['外送買大送小', '買大送小', '買大送大', '外送'];
+        const allEls = [...document.querySelectorAll('div, span, button, [role="button"], [role="radio"], [role="option"]')].filter(el => {
+          const t = el.textContent.trim();
+          return el.getBoundingClientRect().height > 0 && t.length > 3 && t.length < 80;
+        });
+        // Try to find and click the best matching deal
+        for (const kw of dealKeywords) {
+          const match = allEls.find(el => el.textContent.trim().includes(kw) && el.textContent.trim().length < 60);
+          if (match) {
+            const clickTarget = match.closest('[role="button"]') || match.closest('button') || match;
+            clickTarget.click();
+            return 'selected:' + match.textContent.trim().substring(0, 40);
+          }
+        }
+        // Look for any "套用"/"使用"/"選擇" button
+        const applyBtns = allEls.filter(el => {
+          const t = el.textContent.trim();
+          return (t === '套用' || t === '使用' || t === '選擇' || t === '確認') && el.tagName === 'BUTTON';
+        });
+        if (applyBtns.length > 0) { applyBtns[0].click(); return 'apply-btn:' + applyBtns[0].textContent.trim(); }
+        // Check if the voucher was auto-applied (page changed)
+        const body = document.body.innerText;
+        if (body.includes('已套用') || body.includes('優惠已') || body.includes('折扣')) return 'auto-applied';
+        return null;
+      });
+      if (dealSelected) {
+        console.log(`    Deal: ${dealSelected}`);
+        promoUsed = true;
+        await page.waitForTimeout(2000);
+      } else {
+        console.log('    No deal selection UI appeared (voucher may have been auto-applied)');
+        promoUsed = true;
+      }
+    } else {
+      console.log(`    ${voucherApplied.debug || 'No voucher card found'}`);
+      // Fallback: try clicking any "新增優惠券" button on the page
+      const fallbackBtn = await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button')].filter(el =>
+          el.textContent.trim() === '新增優惠券' && el.getBoundingClientRect().height > 0
+        );
+        if (btns.length > 0) { btns[0].click(); return true; }
+        return false;
+      });
+      if (fallbackBtn) {
+        console.log('    Clicked fallback "新增優惠券" button');
+        await page.waitForTimeout(3000);
+        // Try to select deal from opened UI
+        const dealPicked = await page.evaluate(() => {
+          const els = [...document.querySelectorAll('div, button, [role="button"]')].filter(el => {
+            const t = el.textContent.trim();
+            return (t.includes('買大送小') || t.includes('買大送大') || t.includes('外送')) && t.length < 60 && el.getBoundingClientRect().height > 0;
+          });
+          if (els.length > 0) { els[0].click(); return els[0].textContent.trim().substring(0, 40); }
+          return null;
+        });
+        if (dealPicked) { console.log(`    Selected: ${dealPicked}`); promoUsed = true; }
+        await page.waitForTimeout(2000);
+      }
+    }
+  }
 }
 
 console.log('');
@@ -707,8 +947,9 @@ console.log('');
 // ============================================================
 console.log('=== STEP 3: Add Items ===');
 
-async function addPizza(name) {
-  console.log(`  [Pizza] ${name}...`);
+async function addPizza(name, opts = {}) {
+  const { size, crust } = opts;
+  console.log(`  [Pizza] ${name}${size ? ' (' + size + ')' : ''}${crust ? ' 餅皮:' + crust : ''}...`);
   await page.goto('https://order.dominos.com.tw/menu/pizza', { waitUntil: 'domcontentloaded', timeout: 15000 });
   await page.waitForTimeout(3000);
 
@@ -759,9 +1000,22 @@ async function addPizza(name) {
 
   if (!modalOpen) { console.log(`    ✗ add button not found (modal didn't open)`); return false; }
 
-  // Select size: 大披薩 for 3+ people, otherwise keep default
-  if (constraints.people >= 3) {
-    await page.evaluate(() => { [...document.querySelectorAll('div, span, button')].filter(el => el.textContent.trim() === '大披薩' && el.children.length <= 1).forEach(el => el.click()); });
+  // Select size: exact mode uses specified size, otherwise 大披薩 for 3+ people
+  const targetSize = size === '大' ? '大披薩' : size === '小' ? '小披薩' : size === '中' ? '中披薩' : (constraints.people >= 3 ? '大披薩' : null);
+  if (targetSize) {
+    await page.evaluate((sz) => { [...document.querySelectorAll('div, span, button')].filter(el => el.textContent.trim() === sz && el.children.length <= 1).forEach(el => el.click()); }, targetSize);
+    await page.waitForTimeout(500);
+  }
+
+  // Select crust if specified (手拍, 鬆厚, 經典, 帕瑪滋心, etc.)
+  if (crust) {
+    await page.evaluate((c) => {
+      const els = [...document.querySelectorAll('div, span, button')].filter(el =>
+        el.textContent.trim().includes(c) && el.children.length <= 2 && el.getBoundingClientRect().height > 0
+      );
+      if (els.length > 0) { els.sort((a,b) => a.textContent.length - b.textContent.length); els[0].click(); }
+    }, crust);
+    await page.waitForTimeout(500);
   }
   await page.waitForTimeout(800);
 
@@ -771,40 +1025,211 @@ async function addPizza(name) {
   return true;
 }
 
-// Add each selected pizza
+// Add each selected pizza (exact mode or constraint mode)
 let addedCount = 0;
-for (const pizza of selectedPizzas) {
-  const ok = await addPizza(pizza.name);
-  if (ok) addedCount++;
+if (exactOrder) {
+  for (const pizza of exactOrder.pizzas) {
+    const ok = await addPizza(pizza.name, { size: pizza.size, crust: pizza.crust });
+    if (ok) addedCount++;
+  }
+} else {
+  for (const pizza of selectedPizzas) {
+    const ok = await addPizza(pizza.name);
+    if (ok) addedCount++;
+  }
+}
+
+// Add exact sides from sides menu (exact mode)
+if (exactOrder && exactOrder.sides.length > 0) {
+  console.log(`  [Sides] Adding ${exactOrder.sides.length} specific items...`);
+
+  // Navigate to sides by clicking the "副食" menuitem in the top nav bar
+  async function navigateToSides() {
+    const tabClicked = await page.evaluate(() => {
+      // The category is "副食" (not "副餐") — it's a role="menuitem" DIV in the top NAV
+      const menuItems = [...document.querySelectorAll('[role="menuitem"], [role="tab"]')].filter(el => {
+        const t = el.textContent.trim();
+        return (t === '副食' || t === '副餐' || t.includes('副食')) && el.getBoundingClientRect().height > 0;
+      });
+      if (menuItems.length > 0) { menuItems[0].click(); return 'menuitem:' + menuItems[0].textContent.trim(); }
+      // Broader search: any element in the top nav area (y < 150) with 副食
+      const topNav = [...document.querySelectorAll('nav [role="menuitem"], nav div, nav span')].filter(el => {
+        const t = el.textContent.trim();
+        return (t === '副食' || t === '副餐') && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().y < 150;
+      });
+      if (topNav.length > 0) { topNav[0].click(); return 'nav:' + topNav[0].textContent.trim(); }
+      // Last resort: find in the NAV that contains "披薩" and "飲料" (the category nav)
+      const navEl = document.querySelector('nav[role="navigation"]');
+      if (navEl) {
+        const items = [...navEl.querySelectorAll('*')].filter(el => {
+          const t = el.textContent.trim();
+          return (t === '副食' || t === '副餐') && el.children.length <= 2 && el.getBoundingClientRect().height > 0;
+        });
+        if (items.length > 0) { items[0].click(); return 'nav-child:' + items[0].textContent.trim(); }
+      }
+      return null;
+    });
+    if (tabClicked) {
+      console.log(`    Nav: clicked (${tabClicked})`);
+      await page.waitForTimeout(4000);
+      return true;
+    }
+    // Fallback: use URL with menu/sides
+    console.log(`    Nav: "副食" not found, trying URL...`);
+    await page.goto('https://order.dominos.com.tw/menu/sides', { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(5000);
+    return false;
+  }
+
+  // Make sure we're on the menu page first (not checkout)
+  if (!page.url().includes('/menu')) {
+    await page.goto('https://order.dominos.com.tw/menu/pizza', { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.waitForTimeout(3000);
+  }
+
+  await navigateToSides();
+
+  // Wait for side items to appear (look for NT$ price indicators)
+  let sidesLoaded = false;
+  for (let w = 0; w < 10; w++) {
+    sidesLoaded = await page.evaluate(() => {
+      const items = [...document.querySelectorAll('[role="button"], [data-testid*="product"]')].filter(el => {
+        const t = el.textContent.trim();
+        return t.includes('NT$') && t.length < 80 && !t.includes('訂單') && !t.includes('尺寸') && el.getBoundingClientRect().height > 0;
+      });
+      return items.length >= 3;
+    });
+    if (sidesLoaded) break;
+    await page.waitForTimeout(1000);
+  }
+  if (!sidesLoaded) {
+    console.log(`    [Warn] Sides page may not have loaded products`);
+  }
+
+  for (const sideName of exactOrder.sides) {
+    console.log(`    Adding: ${sideName}...`);
+    const keywords = [sideName];
+    if (sideName.includes('鱈魚')) keywords.push('鱈魚');
+    if (sideName.includes('花椒')) keywords.push('花椒');
+    if (sideName.includes('薯球')) keywords.push('薯球');
+    if (sideName.includes('雞塊')) keywords.push('雞塊');
+    if (sideName.includes('雞條')) keywords.push('雞條');
+    if (sideName.includes('星星')) keywords.push('星星');
+    if (sideName.length >= 4) keywords.push(sideName.substring(0, 3));
+
+    // Scroll and search for the item
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(500);
+    let found = null;
+    for (let s = 0; s < 30; s++) {
+      found = await page.evaluate((kws) => {
+        const els = [...document.querySelectorAll('div, span, h3, button, [role="button"]')].filter(e => {
+          const t = e.textContent.trim();
+          if (t.length < 3 || t.length > 60 || e.getBoundingClientRect().height <= 0) return false;
+          if (t.includes('訂單') || t.includes('尺寸') || t.includes('餅皮')) return false;
+          return kws.some(k => t.includes(k));
+        });
+        els.sort((a, b) => a.textContent.trim().length - b.textContent.trim().length);
+        if (els.length > 0) {
+          const el = els[0];
+          const clickTarget = el.closest('[role="button"]') || el.closest('button') || el.closest('[data-testid*="product"]') || el.parentElement?.parentElement || el;
+          clickTarget.click();
+          return el.textContent.trim().substring(0, 40);
+        }
+        return null;
+      }, keywords);
+      if (found) break;
+      await page.evaluate(() => window.scrollBy(0, 400));
+      await page.waitForTimeout(400);
+    }
+
+    if (!found) {
+      // Try upsell cards as fallback
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(1000);
+      found = await page.evaluate((kws) => {
+        const cards = [...document.querySelectorAll('[data-testid*="inline-upsell-card"], [data-testid*="product"]')];
+        for (const card of cards) {
+          const text = card.textContent || '';
+          if (kws.some(k => text.includes(k)) && text.includes('增加') && card.getBoundingClientRect().height > 0) {
+            const btn = card.querySelector('[data-testid*="button.add"]') || [...card.querySelectorAll('button, [role="button"]')].find(b => b.textContent.trim() === '增加');
+            if (btn) { btn.click(); return 'upsell:' + text.substring(0, 30); }
+          }
+        }
+        return null;
+      }, keywords);
+    }
+
+    if (found) {
+      console.log(`      found: "${found}"`);
+      await page.waitForTimeout(2500);
+      // Click add button if modal appeared
+      await page.evaluate(() => {
+        const modalBtn = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '增加到訂單中' && el.getBoundingClientRect().height > 0);
+        if (modalBtn) { modalBtn.click(); return; }
+        const inl = [...document.querySelectorAll('button, [role="button"]')].find(el => {
+          const t = el.textContent.trim();
+          return (t === '增加' || t === '加入') && el.getBoundingClientRect().height > 0;
+        });
+        if (inl) inl.click();
+      });
+      console.log(`      ✓`);
+      await page.waitForTimeout(2000);
+    } else {
+      console.log(`      ✗ not found (tried: ${keywords.join(', ')})`);
+    }
+  }
 }
 
 // Add drink from suggestions
 if (constraints.wantCola) {
   const drinkTotal = constraints.drinkCount || 1;
-  console.log(`  [Drink] Selecting ${drinkTotal > 1 ? drinkTotal + ' drinks' : 'random drink'}...`);
+  console.log(`  [Drink] Selecting ${drinkTotal > 1 ? drinkTotal + ' drinks' : 'cola/drink'}...`);
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await page.waitForTimeout(1500);
-  // First drink: pick from upsell cards
+  // First drink: pick ONLY drink upsell cards (exclude non-drink items like chicken wings)
   const drinkResult = await page.evaluate((wantSpecificCola) => {
-    const DRINK_KEYWORDS = ['可樂', '雪碧', '芬達', '奶茶', '紅茶', '綠茶', '檸檬', '汽水', '果汁', '舒跑'];
+    const DRINK_KEYWORDS = ['可樂', '雪碧', '芬達', '奶茶', '紅茶', '綠茶', '檸檬', '汽水', '果汁', '舒跑', '1.25L', '600ml'];
+    const NON_DRINK = ['雞翅', '雞塊', '薯球', '雞條', '濃湯', '烤翅', '披薩'];
     const cards = [...document.querySelectorAll('[data-testid*="inline-upsell-card"]')];
-    const drinkCards = cards.filter(c => {
-      const text = c.textContent || '';
-      return DRINK_KEYWORDS.some(k => text.includes(k)) && text.includes('增加') && text.length < 150;
-    });
-    let target = drinkCards.length > 0 ? drinkCards[Math.floor(Math.random() * drinkCards.length)] : null;
+    // Find cards that are specifically drink items (not combo cards with mixed items)
+    const drinkCards = [];
+    for (const card of cards) {
+      const text = card.textContent || '';
+      if (!DRINK_KEYWORDS.some(k => text.includes(k))) continue;
+      if (!text.includes('增加')) continue;
+      // Check if this card is specifically a drink (not a mixed upsell section)
+      // Look for individual add buttons within the card
+      const addBtns = [...card.querySelectorAll('button, [role="button"]')].filter(b => b.textContent.trim() === '增加');
+      for (const btn of addBtns) {
+        // Get the item context around this button
+        const itemContainer = btn.closest('[data-testid*="card"]') || btn.parentElement?.parentElement || btn.parentElement;
+        const itemText = itemContainer ? itemContainer.textContent.trim() : '';
+        if (DRINK_KEYWORDS.some(k => itemText.includes(k)) && !NON_DRINK.some(k => itemText.includes(k)) && itemText.length < 80) {
+          drinkCards.push({ btn, text: itemText, card });
+        }
+      }
+    }
+    // If no individual drink buttons found, try the whole card approach
+    if (drinkCards.length === 0) {
+      for (const card of cards) {
+        const text = card.textContent || '';
+        if (DRINK_KEYWORDS.some(k => text.includes(k)) && text.length < 60 && !NON_DRINK.some(k => text.includes(k))) {
+          const btn = card.querySelector('[data-testid*="button.add"]') || [...card.querySelectorAll('button')].find(b => b.textContent.trim() === '增加');
+          if (btn) drinkCards.push({ btn, text, card });
+        }
+      }
+    }
+    let target = drinkCards.length > 0 ? drinkCards[0] : null;
     if (wantSpecificCola && drinkCards.length > 0) {
-      const colaCard = drinkCards.find(c => c.textContent.includes('可樂'));
-      if (colaCard) target = colaCard;
+      const colaItem = drinkCards.find(d => d.text.includes('可樂'));
+      if (colaItem) target = colaItem;
     }
     if (target) {
-      const btn = target.querySelector('[data-testid*="button.add"]') || [...target.querySelectorAll('button')].find(b => b.textContent.trim() === '增加');
-      if (btn) {
-        btn.click();
-        const name = (target.querySelector('[data-testid*="name"]') || target.querySelector('span') || target)
-          .textContent.replace(/\s+/g,' ').trim().split('NT$')[0].trim();
-        return name.substring(0, 20);
-      }
+      target.btn.click();
+      // Extract just the drink name
+      const nameMatch = target.text.match(/([\d.]+L[^\s]*|可樂|雪碧|芬達|奶茶|紅茶|綠茶|檸檬|汽水|果汁|舒跑)/);
+      return nameMatch ? nameMatch[0] : target.text.split('NT$')[0].trim().substring(0, 15);
     }
     return null;
   }, constraints.wantSpecificCola);
@@ -871,8 +1296,8 @@ if (!page.url().includes('/checkout')) {
   await page.waitForTimeout(4000);
 }
 
-// Add side from checkout suggestions
-if (constraints.wantSide) {
+// Add side from checkout suggestions (skip in exact order mode — sides already added)
+if (constraints.wantSide && !exactOrder) {
   console.log('  [Side] Adding from checkout suggestions...');
   await page.waitForTimeout(1000);
   const sideOk = await page.evaluate((noSeafood) => {
@@ -901,6 +1326,48 @@ if (constraints.wantSide) {
   }, constraints.noSeafood);
   console.log(`    ${sideOk}`);
   await page.waitForTimeout(2000);
+}
+
+// Auto-apply coupons at checkout — look for available vouchers in the order summary
+if (exactOrder && exactOrder.wantCoupon) {
+  console.log('  [Coupon] Checking for available vouchers at checkout...');
+  await page.waitForTimeout(1500);
+  // Look for "新增優惠券" or voucher section and click to expand/apply
+  const couponResult = await page.evaluate(() => {
+    // Strategy 1: Find "新增優惠券" button (same as on menu page)
+    const addCouponBtns = [...document.querySelectorAll('button')].filter(el =>
+      el.textContent.trim() === '新增優惠券' && el.getBoundingClientRect().height > 0
+    );
+    if (addCouponBtns.length > 0) { addCouponBtns[0].click(); return 'clicked:新增優惠券'; }
+    // Strategy 2: Look for expandable coupon/voucher section
+    const expandBtn = [...document.querySelectorAll('div, button, [role="button"]')].find(el => {
+      const t = el.textContent.trim();
+      return (t.includes('優惠券') || t.includes('折扣') || t.includes('新增優惠') || t.includes('查看可用')) && t.length < 30 && el.getBoundingClientRect().height > 0;
+    });
+    if (expandBtn) { expandBtn.click(); return 'expanded:' + expandBtn.textContent.trim(); }
+    return 'no_coupon_ui';
+  });
+  console.log(`    Coupon: ${couponResult}`);
+  await page.waitForTimeout(2000);
+
+  // If a coupon list/modal opened, select the best matching one
+  if (couponResult !== 'no_coupon_ui') {
+    const appliedCoupon = await page.evaluate(() => {
+      // Look for voucher items with "套用"/"使用"/"選擇" buttons
+      const applyBtns = [...document.querySelectorAll('button, [role="button"]')].filter(el => {
+        const t = el.textContent.trim();
+        return (t === '套用' || t === '使用' || t === '選擇' || t === '領取') && el.getBoundingClientRect().height > 0;
+      });
+      if (applyBtns.length > 0) { applyBtns[0].click(); return applyBtns[0].parentElement?.textContent?.trim()?.substring(0, 50) || 'applied'; }
+      // Look for radio buttons or selectable coupon cards
+      const cards = [...document.querySelectorAll('[data-testid*="voucher"], [data-testid*="coupon"]')].filter(el => el.getBoundingClientRect().height > 0);
+      if (cards.length > 0) { cards[0].click(); return 'card:' + cards[0].textContent.trim().substring(0, 40); }
+      return null;
+    });
+    if (appliedCoupon) console.log(`    Applied: ${appliedCoupon}`);
+    await page.waitForTimeout(1500);
+  }
+  await page.screenshot({ path: `${SS}/coupon-applied.png` });
 }
 
 // Read final order
@@ -1025,17 +1492,27 @@ for (let attempt = 0; attempt < 5 && !gatewayReached; attempt++) {
 
   try {
     if (attempt <= 1) {
-      // Find the 下單 button/text inside or near the CC tile
+      // Click the credit card tile's 下單 button specifically
       const clicked = await page.evaluate(() => {
-        // Look for standalone 下單 button
-        const btns = [...document.querySelectorAll('button, [role="button"], div')].filter(el => {
+        // Strategy: find the CreditCard tile and click its submit area
+        const ccTile = document.querySelector('[data-testid="payment-method.CreditCard.tile"]');
+        if (ccTile) {
+          // Look for 下單 text within or near the CC tile
+          const btnsInTile = [...ccTile.querySelectorAll('button, [role="button"], div, span')].filter(el => {
+            const t = el.textContent.trim();
+            return t.includes('下單') && !t.includes('重新') && t.length < 80;
+          });
+          if (btnsInTile.length > 0) { btnsInTile[0].click(); return 'cc-tile:' + btnsInTile[0].textContent.trim().substring(0, 40); }
+          // Click the tile itself
+          ccTile.click();
+          return 'cc-tile-direct';
+        }
+        // Fallback: find button that starts with "信用卡" and contains "下單"
+        const allBtns = [...document.querySelectorAll('button, [role="button"], div')].filter(el => {
           const t = el.textContent.trim();
-          return t.includes('下單') && !t.includes('重新') && el.getBoundingClientRect().height > 0 && t.length < 80;
+          return t.startsWith('信用卡') && t.includes('下單') && el.getBoundingClientRect().height > 0 && t.length < 80;
         });
-        // Prefer the one that also mentions 信用卡 or NT$
-        const ccBtn = btns.find(b => b.textContent.includes('信用卡') || b.textContent.includes('NT$'));
-        const target = ccBtn || btns[0];
-        if (target) { target.click(); return target.textContent.trim().substring(0, 50); }
+        if (allBtns.length > 0) { allBtns[0].click(); return allBtns[0].textContent.trim().substring(0, 40); }
         return null;
       });
       console.log(`  Attempt ${attempt + 1}: clicked "${clicked}"`);

@@ -903,9 +903,10 @@ await page.waitForTimeout(2000);
 console.log('  Retrieving virtual card via MCP (view_virtual_card)...');
 const mcpRes = await fetch(CARD_MCP_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'view_virtual_card', arguments: { passphrase: PASSPHRASE, card_opaque_id: CARD_OPAQUE_ID, settlement_tx: SETTLEMENT_TX } } }) });
 const mcpJson = await mcpRes.json();
+console.log('  MCP Response:', JSON.stringify(mcpJson, null, 2));
 let iframeUrl = '';
 if (mcpJson.result && mcpJson.result.content) { for (const item of mcpJson.result.content) { if (item.text) { try { const p = JSON.parse(item.text); if (p.iframe_url) iframeUrl = p.iframe_url; } catch(e) {} } } }
-if (!iframeUrl) { console.log('FATAL: No iframe URL from MCP'); await browser.close(); process.exit(1); }
+if (!iframeUrl) { console.log('FATAL: No iframe URL from MCP. Full response above.'); await browser.close(); process.exit(1); }
 
 // Show card in visible tab for demo
 const cardPage = await context.newPage();
@@ -969,7 +970,22 @@ if (SUBMIT_PAYMENT) {
     const btn = [...document.querySelectorAll('input[type="submit"], button[type="submit"], input[type="image"]')].find(el => el.getBoundingClientRect().height > 0);
     if (btn) btn.click();
   });
-  await page.waitForTimeout(8000);
+  // Wait for 3DS verification — StraitsX auto-approves but it takes time
+  console.log('  Waiting for 3DS verification (auto-approved by StraitsX, up to 60s)...');
+  await page.waitForTimeout(10000);
+  await page.screenshot({ path: `${SS}/smart-3ds.png` });
+  // Check if we're on a 3DS page and wait for redirect
+  const is3ds = page.url().includes('3ds') || page.url().includes('acs') || page.url().includes('secure') || await page.evaluate(() => document.body.innerText.includes('驗證') || document.body.innerText.includes('Verification') || document.body.innerText.includes('OTP'));
+  if (is3ds) {
+    console.log('  3DS page detected, waiting for auto-approval (up to 90s)...');
+    try {
+      await page.waitForURL(url => !url.toString().includes('3ds') && !url.toString().includes('acs') && !url.toString().includes('secure'), { timeout: 90000 });
+    } catch(e) {
+      console.log('  3DS wait timed out, checking current state...');
+    }
+  } else {
+    await page.waitForTimeout(5000);
+  }
   await page.screenshot({ path: `${SS}/smart-submitted.png` });
   console.log('  Payment submitted! URL:', page.url());
 }
@@ -993,5 +1009,5 @@ console.log(`  Payment: Card filled, NOT submitted ✓`);
 console.log(`${'═'.repeat(55)}\n`);
 
 console.log('Browser open 30s for inspection...');
-await page.waitForTimeout(10000);
+await page.waitForTimeout(SUBMIT_PAYMENT ? 30000 : 10000);
 await browser.close();

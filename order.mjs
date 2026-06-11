@@ -1803,7 +1803,7 @@ for (const s of selects) {
   const selector = s.id ? `#${s.id}` : `select[name="${s.name}"]`;
   try {
     if (hint.includes('month') || hint.includes('mm')) await page.locator(selector).first().selectOption(CARD_EXP_MM);
-    else if (hint.includes('year') || hint.includes('yy')) { try { await page.locator(selector).first().selectOption(`20${CARD_EXP_YY}`); } catch(e) { await page.locator(selector).first().selectOption(CARD_EXP_YY); } }
+    else if (hint.includes('year') || hint.includes('yy')) { try { await page.locator(selector).first().selectOption(`20${CARD_EXP_YY}`, { timeout: 2000 }); } catch(e) { await page.locator(selector).first().selectOption(CARD_EXP_YY); } }
   } catch(e) {}
 }
 await page.waitForTimeout(1000);

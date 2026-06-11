@@ -112,8 +112,9 @@ function parseExactOrder(prompt) {
     }
   }
 
-  // Sides: after 副餐 keyword
+  // Sides: after 副餐 keyword OR segments matching known side patterns
   const sides = [];
+  const SIDE_PATTERNS = /雞翅|雞條|雞塊|薯球|薯餅|濃湯|烤翅|洋蔥圈|麵包球|起司球|雞米花|鱈魚星星|花枝丸|辣雞翅/;
   const sideSegIdx = segments.findIndex(s => s.includes('副餐'));
   if (sideSegIdx >= 0) {
     let sideText = segments[sideSegIdx].replace(/^.*副餐/, '').trim();
@@ -123,22 +124,30 @@ function parseExactOrder(prompt) {
       sides.push(...segments[i].split(/跟|和/).filter(s => s.length > 1));
     }
   }
+  // Also catch side items that appear as standalone segments (not matched as pizza)
+  for (const seg of segments) {
+    const cleaned = seg.replace(/^(跟|和|再來|還要|加)/, '').trim();
+    if (SIDE_PATTERNS.test(cleaned) && !sides.includes(cleaned)) {
+      sides.push(cleaned);
+    }
+  }
 
-  // Time: 禮拜X晚上Y點
-  let desiredDay = '', desiredHour = 0;
+  // Time: 禮拜X晚上Y點半
+  let desiredDay = '', desiredHour = 0, desiredMinute = 0;
   const dayMap = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'日':7,'天':7};
-  const timeMatch = prompt.match(/(禮拜|星期|週)([一二三四五六日天]).*?(?:晚上|下午|傍晚|上午|中午|早上)?([一二三四五六七八九十\d]+)[點時]/);
+  const timeMatch = prompt.match(/(禮拜|星期|週)([一二三四五六日天]).*?(?:晚上|下午|傍晚|上午|中午|早上)?([一二三四五六七八九十\d]+)[點時](半)?/);
   if (timeMatch) {
     desiredDay = timeMatch[2];
     desiredHour = parseInt(timeMatch[3]) || cnNum[timeMatch[3]] || 0;
     if (/晚上|傍晚|下午/.test(prompt) && desiredHour < 12) desiredHour += 12;
+    if (timeMatch[4] === '半') desiredMinute = 30;
   }
 
   // Coupon: 自動套用優惠券
   const wantCoupon = /優惠券|優惠碼|coupon|自動套用/i.test(prompt);
 
   if (pizzas.length === 0) return null;
-  return { pizzas, sides, desiredDay, desiredHour, wantCoupon };
+  return { pizzas, sides, desiredDay, desiredHour, desiredMinute, wantCoupon };
 }
 
 const exactOrder = parseExactOrder(PROMPT);
@@ -146,7 +155,7 @@ if (exactOrder) {
   console.log('\n*** EXACT ORDER MODE ***');
   console.log('Pizzas:', JSON.stringify(exactOrder.pizzas));
   console.log('Sides:', exactOrder.sides);
-  if (exactOrder.desiredHour) console.log(`Time: 禮拜${exactOrder.desiredDay} ${exactOrder.desiredHour}:00`);
+  if (exactOrder.desiredHour) console.log(`Time: 禮拜${exactOrder.desiredDay} ${exactOrder.desiredHour}:${String(exactOrder.desiredMinute || 0).padStart(2,'0')}`);
   if (exactOrder.wantCoupon) console.log('Coupon: will auto-apply');
   console.log('');
 }
@@ -436,10 +445,11 @@ if (constraints.isDelivery) {
     // Check if user wants a scheduled time
     let wantScheduled = false;
     let desiredHour = exactOrder ? exactOrder.desiredHour : 0;
+    let desiredMinute = exactOrder ? (exactOrder.desiredMinute || 0) : 0;
     let desiredDay = exactOrder ? exactOrder.desiredDay : '';
     if (!desiredHour) {
-      const timeMatch2 = PROMPT.match(/(\d{1,2})\s*[點:時]/);
-      if (timeMatch2) desiredHour = parseInt(timeMatch2[1]);
+      const timeMatch2 = PROMPT.match(/(\d{1,2})\s*[點:時](半)?/);
+      if (timeMatch2) { desiredHour = parseInt(timeMatch2[1]); if (timeMatch2[2] === '半') desiredMinute = 30; }
       else if (constraints.isLunch) desiredHour = 12;
       else if (constraints.isDinner) desiredHour = 18;
     }
@@ -448,7 +458,7 @@ if (constraints.isDelivery) {
     if (hasNowBtn > 0 && !wantScheduled) {
       await page.locator('[data-testid="start-order-now-button"]').click({ force: true });
     } else {
-      console.log(`    Scheduling: ${desiredDay || 'today'} ${desiredHour || 'ASAP'}:00`);
+      console.log(`    Scheduling: ${desiredDay || 'today'} ${desiredHour || 'ASAP'}:${String(desiredMinute).padStart(2,'0')}`);
       // Click expander to reveal scheduling UI
       const expander = page.locator('[data-testid="order-later-expander-button"]');
       if (await expander.count() > 0) {
@@ -485,27 +495,28 @@ if (constraints.isDelivery) {
         await timeSelect.click();
         await page.waitForTimeout(1500);
         // Try clicking time option from dropdown
-        const timeClicked = await page.evaluate((targetHour) => {
+        const timeClicked = await page.evaluate(({targetHour, targetMinute}) => {
           const opts = [...document.querySelectorAll('div, span, option')].filter(el =>
             /^\d{1,2}:\d{2}/.test(el.textContent.trim()) && el.textContent.trim().length < 20 && el.children.length <= 1 && el.getBoundingClientRect().height > 0
           );
           if (opts.length === 0) return 'no_options';
           if (targetHour === 0) { opts[0].click(); return opts[0].textContent.trim(); }
+          const targetTotal = targetHour * 60 + (targetMinute || 0);
           let best = opts[0], bestDiff = 999;
           for (const opt of opts) {
             const t = opt.textContent.trim();
             const parts = t.match(/(\d{1,2}):(\d{2})/);
             if (!parts) continue;
             let h = parseInt(parts[1]);
-            // Detect PM: if text or parent contains 下午/PM, or hour < current options suggest PM
+            const m = parseInt(parts[2]);
             const ctx = (opt.parentElement?.textContent || '') + t;
             if (ctx.includes('下午') || ctx.includes('PM')) { if (h < 12) h += 12; }
-            const diff = Math.abs(h - targetHour);
+            const diff = Math.abs((h * 60 + m) - targetTotal);
             if (diff < bestDiff) { bestDiff = diff; best = opt; }
           }
           best.click();
           return best.textContent.trim();
-        }, desiredHour);
+        }, {targetHour: desiredHour, targetMinute: desiredMinute});
         console.log(`    Time selected: ${timeClicked}`);
         await page.waitForTimeout(1500);
       }
@@ -575,9 +586,10 @@ if (!storeOk) {
   } else {
     console.log('    Store closed → selecting time for 預約');
     let desiredHour = exactOrder ? exactOrder.desiredHour : 0;
+    let desiredMinute = exactOrder ? (exactOrder.desiredMinute || 0) : 0;
     if (!desiredHour) {
-      const timeMatch = PROMPT.match(/(\d{1,2})\s*[點:時]/);
-      if (timeMatch) desiredHour = parseInt(timeMatch[1]);
+      const timeMatch = PROMPT.match(/(\d{1,2})\s*[點:時](半)?/);
+      if (timeMatch) { desiredHour = parseInt(timeMatch[1]); if (timeMatch[2] === '半') desiredMinute = 30; }
       else if (constraints.isLunch) desiredHour = 12;
       else if (constraints.isDinner) desiredHour = 18;
     }
@@ -587,26 +599,27 @@ if (!storeOk) {
     if (await timeSelect.count() > 0) {
       await timeSelect.click();
       await page.waitForTimeout(1000);
-      // Pick the time closest to desired hour
-      await page.evaluate((targetHour) => {
+      await page.evaluate(({targetHour, targetMinute}) => {
         const opts = [...document.querySelectorAll('div, span')].filter(el =>
           /^\d{1,2}:\d{2}/.test(el.textContent.trim()) && el.textContent.trim().length < 20 && el.children.length <= 1
         );
         if (opts.length === 0) return;
         if (targetHour === 0) { opts[0].click(); return; }
-        // Find closest match to target hour
+        const targetTotal = targetHour * 60 + (targetMinute || 0);
         let best = opts[0];
         let bestDiff = 999;
         for (const opt of opts) {
-          const h = parseInt(opt.textContent.trim().split(':')[0]);
-          // Handle AM/PM: if text includes 下午/PM, add 12
+          const parts = opt.textContent.trim().match(/(\d{1,2}):(\d{2})/);
+          if (!parts) continue;
+          let h = parseInt(parts[1]);
+          const m = parseInt(parts[2]);
           const isPM = opt.textContent.includes('下午') || opt.textContent.includes('PM');
-          const hour24 = (isPM && h < 12) ? h + 12 : h;
-          const diff = Math.abs(hour24 - targetHour);
+          if (isPM && h < 12) h += 12;
+          const diff = Math.abs((h * 60 + m) - targetTotal);
           if (diff < bestDiff) { bestDiff = diff; best = opt; }
         }
         best.click();
-      }, desiredHour);
+      }, {targetHour: desiredHour, targetMinute: desiredMinute});
       await page.waitForTimeout(1000);
     }
     await page.locator('[data-testid="start-order-later-button"]').click({ force: true });
@@ -787,33 +800,57 @@ if (!promoUsed) {
   await page.waitForTimeout(3000);
 
   // Apply voucher: click "新增優惠券" on the voucher card (e.g. "買大送大")
-  // For exact order mode: apply here, then use deal-builder for 大 pizzas, add others separately
-  if (exactOrder && exactOrder.wantCoupon) {
+  // Auto-apply when 2+ large pizzas OR user explicitly requests coupon
+  const hasMultipleLargePizzas = exactOrder && exactOrder.pizzas.filter(p => p.size === '大').length >= 2;
+  if (exactOrder && (exactOrder.wantCoupon || hasMultipleLargePizzas)) {
     console.log('  [Voucher] Applying deal from pizza menu page...');
     // Scroll to top to ensure voucher cards are visible
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForTimeout(2000);
 
     const voucherApplied = await page.evaluate(() => {
-      // Find voucher cards (testId contains "Voucher")
-      const voucherCards = [...document.querySelectorAll('[data-testid*="Voucher"][data-testid*="lovable-menu"]')];
-      if (voucherCards.length === 0) return { found: false, debug: 'no voucher cards with testId' };
-      // Prefer "買大送小" then "買大送大" voucher
+      // Strategy 1: testId-based selectors
+      let voucherCards = [...document.querySelectorAll('[data-testid*="Voucher"][data-testid*="lovable-menu"]')];
+      // Strategy 2: any element containing 買大送大/買大送小 text
+      if (voucherCards.length === 0) {
+        voucherCards = [...document.querySelectorAll('[data-testid*="lovable-menu"]')].filter(el =>
+          /買大送[大小]|送可樂/.test(el.textContent || '')
+        );
+      }
+      // Strategy 3: broader search for cards/buttons with coupon text
+      if (voucherCards.length === 0) {
+        voucherCards = [...document.querySelectorAll('div, section, article, [role="button"]')].filter(el => {
+          const t = el.textContent || '';
+          const r = el.getBoundingClientRect();
+          return r.height > 40 && r.height < 300 && /買大送[大小]|送可樂/.test(t) && t.length < 100;
+        });
+      }
+      if (voucherCards.length === 0) {
+        const allText = document.body.innerText.substring(0, 500);
+        return { found: false, debug: `no voucher cards found. Page top: ${allText.substring(0, 200)}` };
+      }
+      // Log all available vouchers
+      const allVouchers = voucherCards.map(el => el.textContent.trim().substring(0, 50));
+      // Priority: 買大送大送可樂 > 買大送大 > 買大送小
       const targetVoucher = voucherCards.find(el => {
         const t = el.textContent || '';
-        return t.includes('買大送小');
+        return t.includes('送可樂');
       }) || voucherCards.find(el => {
         const t = el.textContent || '';
         return t.includes('買大送大');
+      }) || voucherCards.find(el => {
+        const t = el.textContent || '';
+        return t.includes('買大送小');
       }) || voucherCards[0];
       const btn = targetVoucher.querySelector('button');
-      if (btn) { btn.click(); return { found: true, text: targetVoucher.textContent.trim().substring(0, 40), method: 'button' }; }
+      if (btn) { btn.click(); return { found: true, text: targetVoucher.textContent.trim().substring(0, 60), method: 'button', allVouchers }; }
       targetVoucher.click();
-      return { found: true, text: targetVoucher.textContent.trim().substring(0, 40), method: 'card-click' };
+      return { found: true, text: targetVoucher.textContent.trim().substring(0, 60), method: 'card-click', allVouchers };
     });
 
     if (voucherApplied.found) {
-      console.log(`    Clicked voucher: ${voucherApplied.text} (${voucherApplied.method})`);
+      console.log(`    Available vouchers: ${JSON.stringify(voucherApplied.allVouchers || [])}`);
+      console.log(`    Selected: ${voucherApplied.text} (${voucherApplied.method})`);
       promoUsed = true;
       await page.waitForTimeout(3000);
     } else {
@@ -922,20 +959,24 @@ async function addPizza(name, opts = {}) {
   let modalOpen = false;
   for (let attempt = 0; attempt < 3 && !modalOpen; attempt++) {
     let found = false;
+    const searchNames = [name];
+    if (size === '小') searchNames.push(name + '小披薩');
+    if (size === '大') searchNames.push(name + '大披薩');
     for (let s = 0; s < 15; s++) {
-      found = await page.evaluate((n) => {
-        const els = [...document.querySelectorAll('div, span')].filter(e =>
-          e.textContent.trim() === n && e.children.length === 0 && e.getBoundingClientRect().height > 0
-        );
-        if (els.length > 0) {
-          const el = els[0];
-          // Try multiple click targets: role=button ancestor, card container, or element itself
-          const clickTarget = el.closest('[role="button"]') || el.closest('[data-testid]') || el.closest('button') || el.parentElement?.parentElement?.parentElement || el.parentElement?.parentElement || el;
-          clickTarget.click();
-          return true;
+      found = await page.evaluate((names) => {
+        for (const n of names) {
+          const els = [...document.querySelectorAll('div, span')].filter(e =>
+            e.textContent.trim() === n && e.children.length === 0 && e.getBoundingClientRect().height > 0
+          );
+          if (els.length > 0) {
+            const el = els[0];
+            const clickTarget = el.closest('[role="button"]') || el.closest('[data-testid]') || el.closest('button') || el.parentElement?.parentElement?.parentElement || el.parentElement?.parentElement || el;
+            clickTarget.click();
+            return true;
+          }
         }
         return false;
-      }, name);
+      }, searchNames);
       if (found) break;
       await page.evaluate(() => window.scrollBy(0, 500));
       await page.waitForTimeout(500);
@@ -1683,33 +1724,63 @@ const mcpRes = await fetch(CARD_MCP_URL, { method: 'POST', headers: { 'Content-T
 const mcpJson = await mcpRes.json();
 console.log('  MCP Response:', JSON.stringify(mcpJson, null, 2));
 let iframeUrl = '';
-if (mcpJson.result && mcpJson.result.content) { for (const item of mcpJson.result.content) { if (item.text) { try { const p = JSON.parse(item.text); if (p.iframe_url) iframeUrl = p.iframe_url; } catch(e) {} } } }
-if (!iframeUrl) { console.log('FATAL: No iframe URL from MCP. Full response above.'); await browser.close(); process.exit(1); }
+let cardHtml = '';
+if (mcpJson.result && mcpJson.result.content) {
+  for (const item of mcpJson.result.content) {
+    if (item.text) {
+      try {
+        const p = JSON.parse(item.text);
+        if (p.iframe_url) iframeUrl = p.iframe_url;
+        if (p.card_html) cardHtml = p.card_html;
+      } catch(e) {}
+    }
+  }
+}
 
-// Show card in visible tab for demo
-const cardPage = await context.newPage();
-await cardPage.setContent(`
-<html><head><title>StraitsX Virtual Card</title></head>
-<body style="margin:0;padding:30px;background:#0d1117;font-family:'Courier New',monospace;color:#58a6ff;">
-<h2 style="margin:0 0 5px 0;">StraitsX Virtual Card</h2>
-<p style="color:#8b949e;margin:0 0 15px 0;">MCP: view_virtual_card | TX: ${SETTLEMENT_TX.substring(0,10)}...</p>
-<iframe id="cf" src="${iframeUrl}" style="width:450px;height:320px;border:2px solid #58a6ff;border-radius:12px;"></iframe>
-</body></html>
-`);
-await cardPage.waitForTimeout(1500);  // Hold for demo recording
-
-let cardText = '';
-try { cardText = await cardPage.frameLocator('#cf').locator('body').innerText({ timeout: 5000 }); } catch(e) {}
-await cardPage.screenshot({ path: `${SS}/smart-card.png` });
-
-const cardNumMatch = cardText.match(/(\d{4}\s?\d{4}\s?\d{4}\s?\d{4})/);
-const expMatch = cardText.match(/(\d{2})\/(\d{2})/);
-const cvvMatch = cardText.match(/CVV[\s\n]*(\d{3})/i);
-CARD_NUMBER = cardNumMatch ? cardNumMatch[1].replace(/\s/g, '') : '4665171023425884';
-CARD_EXP_MM = expMatch ? expMatch[1] : '05';
-CARD_EXP_YY = expMatch ? expMatch[2] : '29';
-CARD_CVV = cvvMatch ? cvvMatch[1] : '228';
-console.log(`  Card: ${CARD_NUMBER.substring(0,4)} **** **** ${CARD_NUMBER.substring(12)}, Exp: ${CARD_EXP_MM}/${CARD_EXP_YY}`);
+// Parse card details from card_html if available
+if (cardHtml) {
+  const numM = cardHtml.match(/card-number[^>]*>([^<]+)/);
+  const expM = cardHtml.match(/exp_val[^>]*>([^<]+)/);
+  const cvvM = cardHtml.match(/cvv_val[^>]*>([^<]+)/);
+  if (numM) CARD_NUMBER = numM[1].trim().replace(/\s/g, '');
+  if (expM) {
+    const parts = expM[1].trim().match(/(\d{2})\/(\d{2,4})/);
+    if (parts) { CARD_EXP_MM = parts[1]; CARD_EXP_YY = parts[2].length === 4 ? parts[2].substring(2) : parts[2]; }
+  }
+  if (cvvM) CARD_CVV = cvvM[1].trim();
+  console.log(`  Card (from card_html): ${CARD_NUMBER.substring(0,4)} **** **** ${CARD_NUMBER.substring(12)}, Exp: ${CARD_EXP_MM}/${CARD_EXP_YY}`);
+  // Show card in visible tab — fetch CSS from merchant server and inline it
+  const cardPage = await context.newPage();
+  let cvvCss = '', physCss = '';
+  try { cvvCss = await (await fetch('https://merchant.cop.xfers.com/static/cvv/assets/cvv.css')).text(); } catch(e) {}
+  try { physCss = await (await fetch('https://merchant.cop.xfers.com/static/cvv/assets/Xfers/physical.css')).text(); } catch(e) {}
+  physCss = physCss.replace(/url\("\/static/g, 'url("https://merchant.cop.xfers.com/static');
+  const displayHtml = cardHtml
+    .replace(/<link[^>]*cvv\.css[^>]*>/, `<style>${cvvCss}</style>`)
+    .replace(/<link[^>]*physical\.css[^>]*>/, `<style>${physCss}</style>`);
+  await cardPage.setContent(displayHtml, { waitUntil: 'networkidle' });
+  await cardPage.waitForTimeout(2000);
+  await cardPage.screenshot({ path: `${SS}/smart-card.png` });
+} else if (iframeUrl) {
+  // Fallback: iframe only (no card_html) — embed in wrapper page
+  const cardPage = await context.newPage();
+  await cardPage.setContent(`<!DOCTYPE html><html><head><title>StraitsX Virtual Card</title></head><body style="margin:0;padding:0;overflow:hidden;"><iframe id="cf" src="${iframeUrl}" style="width:100vw;height:100vh;border:none;"></iframe></body></html>`, { waitUntil: 'networkidle' });
+  await cardPage.waitForTimeout(2000);
+  let cardText = '';
+  try { cardText = await cardPage.frameLocator('#cf').locator('body').innerText({ timeout: 5000 }); } catch(e) {}
+  await cardPage.screenshot({ path: `${SS}/smart-card.png` });
+  const cardNumMatch = cardText.match(/(\d{4}\s?\d{4}\s?\d{4}\s?\d{4})/);
+  const expMatch = cardText.match(/(\d{2})\/(\d{2})/);
+  const cvvMatch = cardText.match(/CVV[\s\n]*(\d{3})/i);
+  if (cardNumMatch) CARD_NUMBER = cardNumMatch[1].replace(/\s/g, '');
+  if (expMatch) { CARD_EXP_MM = expMatch[1]; CARD_EXP_YY = expMatch[2]; }
+  if (cvvMatch) CARD_CVV = cvvMatch[1];
+  console.log(`  Card (from iframe): ${CARD_NUMBER.substring(0,4)} **** **** ${CARD_NUMBER.substring(12)}, Exp: ${CARD_EXP_MM}/${CARD_EXP_YY}`);
+} else {
+  console.log('FATAL: No card_html or iframe_url from MCP. Full response above.');
+  await browser.close();
+  process.exit(1);
+}
 
 // Switch back and fill
 await page.bringToFront();

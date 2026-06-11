@@ -1627,73 +1627,49 @@ await page.waitForTimeout(500);
 // Step A: Select credit card payment method
 const ccTile = page.locator('[data-testid="payment-method.CreditCard.tile"]');
 await ccTile.click({ force: true }).catch(() => {});
-await page.waitForTimeout(2000);
+await page.waitForTimeout(1000);
 
-// Step B: Click 下單 to submit — this triggers navigation to paydollar
+// Step B: Click 下單 to submit — triggers navigation to payment gateway
 let gatewayReached = false;
-for (let attempt = 0; attempt < 5 && !gatewayReached; attempt++) {
-  // Remove overlays again before each attempt
-  await page.evaluate(() => {
-    document.querySelectorAll('div[tabindex="0"]').forEach(el => {
-      if (el.children.length === 0) { el.style.pointerEvents = 'none'; el.style.display = 'none'; }
+const gatewayPattern = /paydollar|payForm|payment|pay\./i;
+const strategies = [
+  async () => {
+    await page.evaluate(() => {
+      document.querySelectorAll('div[tabindex="0"]').forEach(el => { if (el.children.length === 0) { el.style.pointerEvents = 'none'; el.style.display = 'none'; } });
+      document.querySelectorAll('[disabled], [aria-disabled="true"]').forEach(el => { el.removeAttribute('disabled'); el.removeAttribute('aria-disabled'); el.style.pointerEvents = 'auto'; });
     });
-    document.querySelectorAll('[disabled], [aria-disabled="true"]').forEach(el => {
-      el.removeAttribute('disabled'); el.removeAttribute('aria-disabled');
-      el.style.pointerEvents = 'auto';
-    });
-  });
-  await page.waitForTimeout(300);
-
-  try {
-    if (attempt <= 1) {
-      // Click the credit card tile's 下單 button specifically
-      const clicked = await page.evaluate(() => {
-        // Strategy: find the CreditCard tile and click its submit area
-        const ccTile = document.querySelector('[data-testid="payment-method.CreditCard.tile"]');
-        if (ccTile) {
-          // Look for 下單 text within or near the CC tile
-          const btnsInTile = [...ccTile.querySelectorAll('button, [role="button"], div, span')].filter(el => {
-            const t = el.textContent.trim();
-            return t.includes('下單') && !t.includes('重新') && t.length < 80;
-          });
-          if (btnsInTile.length > 0) { btnsInTile[0].click(); return 'cc-tile:' + btnsInTile[0].textContent.trim().substring(0, 40); }
-          // Click the tile itself
-          ccTile.click();
-          return 'cc-tile-direct';
-        }
-        // Fallback: find button that starts with "信用卡" and contains "下單"
-        const allBtns = [...document.querySelectorAll('button, [role="button"], div')].filter(el => {
-          const t = el.textContent.trim();
-          return t.startsWith('信用卡') && t.includes('下單') && el.getBoundingClientRect().height > 0 && t.length < 80;
-        });
-        if (allBtns.length > 0) { allBtns[0].click(); return allBtns[0].textContent.trim().substring(0, 40); }
-        return null;
-      });
-      console.log(`  Attempt ${attempt + 1}: clicked "${clicked}"`);
-      await page.waitForURL(/paydollar/, { timeout: 12000 });
-    } else if (attempt === 2) {
-      // Try clicking with mouse coordinates
-      const box = await ccTile.boundingBox();
-      if (box) await page.mouse.click(box.x + box.width - 30, box.y + box.height / 2);
-      await page.waitForURL(/paydollar/, { timeout: 12000 });
-    } else if (attempt === 3) {
-      // Try page.click on the testid directly
-      await page.click('[data-testid="payment-method.CreditCard.tile"]', { force: true });
-      await page.waitForURL(/paydollar/, { timeout: 12000 });
-    } else {
-      // Navigate directly if we can find the payment URL
-      const links = await page.evaluate(() => [...document.querySelectorAll('a, form')].map(el => el.href || el.action).filter(u => u && u.includes('paydollar')));
-      if (links.length > 0) { await page.goto(links[0]); }
-      else {
-        // Submit any form on the page
-        await page.evaluate(() => { const f = document.querySelector('form'); if (f) f.submit(); });
+    const clicked = await page.evaluate(() => {
+      const ccTile = document.querySelector('[data-testid="payment-method.CreditCard.tile"]');
+      if (ccTile) {
+        const btnsInTile = [...ccTile.querySelectorAll('button, [role="button"], div, span')].filter(el => { const t = el.textContent.trim(); return t.includes('下單') && !t.includes('重新') && t.length < 80; });
+        if (btnsInTile.length > 0) { btnsInTile[0].click(); return 'cc-tile:' + btnsInTile[0].textContent.trim().substring(0, 40); }
+        ccTile.click(); return 'cc-tile-direct';
       }
-      await page.waitForURL(/paydollar/, { timeout: 12000 });
-    }
+      const allBtns = [...document.querySelectorAll('button, [role="button"], div')].filter(el => { const t = el.textContent.trim(); return t.startsWith('信用卡') && t.includes('下單') && el.getBoundingClientRect().height > 0 && t.length < 80; });
+      if (allBtns.length > 0) { allBtns[0].click(); return allBtns[0].textContent.trim().substring(0, 40); }
+      return null;
+    });
+    console.log(`  Clicked: "${clicked}"`);
+  },
+  async () => {
+    const box = await ccTile.boundingBox();
+    if (box) await page.mouse.click(box.x + box.width - 30, box.y + box.height / 2);
+  },
+  async () => { await page.click('[data-testid="payment-method.CreditCard.tile"]', { force: true }); },
+  async () => {
+    const links = await page.evaluate(() => [...document.querySelectorAll('a, form')].map(el => el.href || el.action).filter(u => u && (u.includes('paydollar') || u.includes('pay'))));
+    if (links.length > 0) await page.goto(links[0]);
+    else await page.evaluate(() => { const f = document.querySelector('form'); if (f) f.submit(); });
+  }
+];
+for (let attempt = 0; attempt < strategies.length && !gatewayReached; attempt++) {
+  try {
+    await strategies[attempt]();
+    await page.waitForURL(url => gatewayPattern.test(url.toString()) && !url.toString().includes('dominos'), { timeout: 5000 });
     gatewayReached = true;
   } catch(e) {
     console.log(`  Payment attempt ${attempt + 1} failed`);
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(300);
   }
 }
 if (!gatewayReached) {
@@ -1705,7 +1681,7 @@ if (!gatewayReached) {
   await browser.close(); process.exit(1);
 }
 console.log('  Payment gateway reached');
-await page.waitForTimeout(1500);
+await page.waitForTimeout(500);
 
 // Select Visa/CC
 await page.evaluate(() => {
@@ -1716,7 +1692,7 @@ await page.evaluate(() => {
   const cc = links.find(el => el.textContent.trim() === '信用卡' || /^Card$/i.test(el.textContent.trim()));
   if (cc) { (cc.closest('a') || cc).click(); }
 });
-await page.waitForTimeout(2000);
+await page.waitForTimeout(800);
 
 // Now retrieve virtual card via MCP (like a real person looking up their card at payment time)
 console.log('  Retrieving virtual card via MCP (view_virtual_card)...');
@@ -1759,13 +1735,13 @@ if (cardHtml) {
     .replace(/<link[^>]*cvv\.css[^>]*>/, `<style>${cvvCss}</style>`)
     .replace(/<link[^>]*physical\.css[^>]*>/, `<style>${physCss}</style>`);
   await cardPage.setContent(displayHtml, { waitUntil: 'networkidle' });
-  await cardPage.waitForTimeout(2000);
+  await cardPage.waitForTimeout(1000);
   await cardPage.screenshot({ path: `${SS}/smart-card.png` });
 } else if (iframeUrl) {
   // Fallback: iframe only (no card_html) — embed in wrapper page
   const cardPage = await context.newPage();
   await cardPage.setContent(`<!DOCTYPE html><html><head><title>StraitsX Virtual Card</title></head><body style="margin:0;padding:0;overflow:hidden;"><iframe id="cf" src="${iframeUrl}" style="width:100vw;height:100vh;border:none;"></iframe></body></html>`, { waitUntil: 'networkidle' });
-  await cardPage.waitForTimeout(2000);
+  await cardPage.waitForTimeout(1000);
   let cardText = '';
   try { cardText = await cardPage.frameLocator('#cf').locator('body').innerText({ timeout: 5000 }); } catch(e) {}
   await cardPage.screenshot({ path: `${SS}/smart-card.png` });
@@ -1787,26 +1763,25 @@ await page.bringToFront();
 await page.waitForTimeout(500);
 
 console.log('  Filling card details...');
-const cardInputs = await page.evaluate(() => [...document.querySelectorAll('input')].filter(el => { const s = window.getComputedStyle(el); return s.display !== 'none' && s.visibility !== 'hidden' && el.type !== 'hidden'; }).map(el => ({ name: el.name, id: el.id, maxLength: el.maxLength, placeholder: el.placeholder })));
-for (const inp of cardInputs) {
-  const sel = inp.id ? `#${inp.id}` : `input[name="${inp.name}"]`;
-  const hint = (inp.name + inp.id + inp.placeholder).toLowerCase();
-  try {
-    if (hint.includes('cardno') || hint.includes('card_no') || hint.includes('pan') || inp.maxLength === 16 || inp.maxLength === 19) await page.locator(sel).first().fill(CARD_NUMBER);
-    else if (hint.includes('cvv') || hint.includes('cvc') || hint.includes('security') || inp.maxLength === 3 || inp.maxLength === 4) await page.locator(sel).first().fill(CARD_CVV);
-    else if (hint.includes('holder') || hint.includes('cardname') || hint.includes('cardholder')) await page.locator(sel).first().fill(CARD_NAME);
-  } catch(e) {}
-}
-const selects = await page.evaluate(() => [...document.querySelectorAll('select')].map(s => ({ name: s.name, id: s.id })));
-for (const s of selects) {
-  const hint = (s.name + s.id).toLowerCase();
-  const selector = s.id ? `#${s.id}` : `select[name="${s.name}"]`;
-  try {
-    if (hint.includes('month') || hint.includes('mm')) await page.locator(selector).first().selectOption(CARD_EXP_MM);
-    else if (hint.includes('year') || hint.includes('yy')) { try { await page.locator(selector).first().selectOption(`20${CARD_EXP_YY}`, { timeout: 2000 }); } catch(e) { await page.locator(selector).first().selectOption(CARD_EXP_YY); } }
-  } catch(e) {}
-}
-await page.waitForTimeout(1000);
+await page.evaluate(({ cardNum, cvv, holder, mm, yy }) => {
+  const nativeSet = (el, val) => { const proto = Object.getPrototypeOf(el); const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(el, val); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); };
+  const inputs = [...document.querySelectorAll('input')].filter(el => { const s = window.getComputedStyle(el); return s.display !== 'none' && s.visibility !== 'hidden' && el.type !== 'hidden'; });
+  for (const el of inputs) {
+    const hint = (el.name + el.id + el.placeholder).toLowerCase();
+    if (hint.includes('cardno') || hint.includes('card_no') || hint.includes('pan') || el.maxLength === 16 || el.maxLength === 19) nativeSet(el, cardNum);
+    else if (hint.includes('security') || hint.includes('cvv') || hint.includes('cvc')) nativeSet(el, cvv);
+    else if (hint.includes('holder') || hint.includes('cardname') || hint.includes('cardholder')) nativeSet(el, holder);
+    else if (hint.includes('exp') && (el.maxLength === 5 || el.maxLength === 7 || el.placeholder?.includes('/'))) nativeSet(el, `${mm}/${yy}`);
+  }
+  const selects = [...document.querySelectorAll('select')];
+  for (const sel of selects) {
+    const hint = (sel.name + sel.id).toLowerCase();
+    const opts = [...sel.options].map(o => o.value);
+    if (hint.includes('month') || hint.includes('mm') || (opts.length >= 12 && opts.length <= 13)) { sel.value = mm; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    else if (hint.includes('year') || hint.includes('yy') || (opts.length >= 5 && opts.length <= 12)) { sel.value = opts.includes(`20${yy}`) ? `20${yy}` : yy; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+  }
+}, { cardNum: CARD_NUMBER, cvv: CARD_CVV, holder: CARD_NAME, mm: CARD_EXP_MM, yy: CARD_EXP_YY });
+await page.waitForTimeout(500);
 await page.screenshot({ path: `${SS}/smart-filled.png` });
 
 const payAmount = await page.evaluate(() => { const m = document.body.innerText.match(/(TWD|NT\$?)\s*[\d,.]+/); return m ? m[0] : 'unknown'; });
